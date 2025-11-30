@@ -3,12 +3,19 @@ Detect and repair missing daily price rows in SQLite DB.
 
 Repairs options:
 - refetch: fetch missing days from Tushare (preferred)
-- ffill: forward-fill last known close for missing days (volume=0, amount=0)
-- mixed: try refetch, fallback to ffill for remaining missing days
+
+Additionally, you can purge erroneous rows on non-trading days using the Tushare
+trading calendar (delete all daily_prices rows where date is not a valid trading day).
 
 Usage examples:
-  python src/repair_data.py --years 2 --method mixed --limit 200
-  python src/repair_data.py --start 20230101 --end 20231231 --method refetch --symbols 000001.SZ,600000.SH
+  # Refetch missing days and purge non-trading rows for last 2 years
+  python src/repair_data.py --years 2 --method refetch --purge
+
+  # Refetch for explicit date range and purge
+  python src/repair_data.py --start 20230101 --end 20231231 --method refetch --purge
+
+  # Specific symbols only
+  python src/repair_data.py --years 2 --symbols 000001.SZ,600000.SH --method refetch --purge
 """
 
 import os
@@ -66,28 +73,6 @@ def get_prev_close(symbol: str, date: str) -> Optional[float]:
     finally:
         conn.close()
 
-def insert_ffill_rows(symbol: str, dates: List[str]) -> int:
-    # Build DataFrame for save_daily_data
-    rows = []
-    for d in dates:
-        prev = get_prev_close(symbol, d)
-        if prev is None:
-            continue
-        rows.append({
-            'symbol': symbol,
-            'date': d,
-            'open': prev,
-            'high': prev,
-            'low': prev,
-            'close': prev,
-            'volume': 0.0,
-            'amount': 0.0,
-        })
-    if not rows:
-        return 0
-    df = pd.DataFrame(rows)
-    return save_daily_data(df) or 0
-
 def refetch_missing(symbol: str, start: str, end: str, missing_days: List[str]) -> int:
     if not missing_days:
         return 0
@@ -110,7 +95,52 @@ def refetch_missing(symbol: str, start: str, end: str, missing_days: List[str]) 
     except Exception:
         return 0
 
-def detect_and_repair(symbols: List[str], start: Optional[str], end: Optional[str], method: str = 'mixed', use_calendar: bool = True):
+def purge_non_trading_rows(start: Optional[str], end: Optional[str], use_calendar: bool = True) -> int:
+    """Delete rows in daily_prices where date is not a valid trading day in [start, end]."""
+    # Determine calendar dates
+    if use_calendar:
+        s = start or '00000000'
+        e = end or '99999999'
+        tdates = set(get_trading_dates(s, e))
+    else:
+        # Fallback to natural dates
+        if start and end:
+            start_dt = datetime.strptime(start, '%Y%m%d')
+            end_dt = datetime.strptime(end, '%Y%m%d')
+        else:
+            end_dt = datetime.now()
+            start_dt = end_dt - timedelta(days=365)
+        tdates = {fmt(d) for d in pd.date_range(start=start_dt, end=end_dt, freq='D')}
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        # Get distinct dates present in DB within range
+        q = 'SELECT DISTINCT date FROM daily_prices'
+        params = []
+        if start:
+            q += ' WHERE date >= ?'
+            params.append(start)
+        if end:
+            q += ' AND date <= ?' if params else ' WHERE date <= ?'
+            params.append(end)
+        present_df = pd.read_sql_query(q, conn, params=params)
+        present_dates = present_df['date'].tolist() if not present_df.empty else []
+        to_delete = [d for d in present_dates if d not in tdates]
+        deleted = 0
+        if to_delete:
+            from tqdm import tqdm
+            pb = tqdm(to_delete, desc='Purge non-trading dates', unit='day')
+            for d in pb:
+                cur.execute('DELETE FROM daily_prices WHERE date = ?', (d,))
+                conn.commit()
+                deleted += cur.rowcount if hasattr(cur, 'rowcount') else 0
+            pb.close()
+        return deleted
+    finally:
+        conn.close()
+
+def detect_and_repair(symbols: List[str], start: Optional[str], end: Optional[str], method: str = 'refetch', use_calendar: bool = True):
     # Prepare trading dates
     if use_calendar:
         s = start or '00000000'
@@ -145,8 +175,7 @@ def detect_and_repair(symbols: List[str], start: Optional[str], end: Optional[st
             continue
         pb.write(f'{sym}: missing {len(missing)} days')
         inserted = 0
-        if method in ('refetch', 'mixed'):
-            # show progress for refetch step
+        if method == 'refetch':
             inserted_refetch = refetch_missing(sym, start or tdates[0], end or tdates[-1], missing)
             inserted += inserted_refetch
             pb.write(f'  refetch inserted {inserted_refetch}')
@@ -154,10 +183,6 @@ def detect_and_repair(symbols: List[str], start: Optional[str], end: Optional[st
             present_df = get_symbol_dates(sym, start, end)
             present_dates = set(present_df['date'].tolist()) if not present_df.empty else set()
             missing = [d for d in tdates if d not in present_dates]
-        if missing and method in ('ffill', 'mixed'):
-            inserted_ffill = insert_ffill_rows(sym, missing)
-            inserted += inserted_ffill
-            pb.write(f'  ffill inserted {inserted_ffill}')
         pb.write(f'  inserted total {inserted} rows for {sym}')
         total_inserted += inserted
     pb.close()
@@ -171,7 +196,8 @@ def main():
     parser.add_argument('--years', type=int, help='Range by last N years if start/end not provided')
     parser.add_argument('--symbols', type=str, help='Comma-separated symbols to process')
     parser.add_argument('--limit', type=int, default=None, help='Limit number of symbols')
-    parser.add_argument('--method', type=str, default='mixed', choices=['refetch','ffill','mixed'], help='Repair method')
+    parser.add_argument('--method', type=str, default='refetch', choices=['refetch'], help='Repair method')
+    parser.add_argument('--purge', action='store_true', help='Purge non-trading day rows after refetch')
     parser.add_argument('--no-calendar', action='store_true', help='Do not use trading calendar (natural dates)')
     parser.add_argument('--no-filter', action='store_true', help='Do not filter ChiNext/STAR/BSE')
     args = parser.parse_args()
@@ -187,6 +213,10 @@ def main():
         syms = syms[:args.limit]
     print(f'Processing {len(syms)} symbols, date range {start or "MIN"}~{end or "MAX"}, method={args.method}')
     detect_and_repair(syms, start, end, method=args.method, use_calendar=not args.no_calendar)
+    if args.purge:
+        print('Purging non-trading day rows ...')
+        deleted = purge_non_trading_rows(start, end, use_calendar=not args.no_calendar)
+        print(f'Purged rows: {deleted}')
 
 if __name__ == '__main__':
     main()
