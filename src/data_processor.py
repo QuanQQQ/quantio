@@ -19,6 +19,7 @@ def calculate_kdj(df, period=9):
     rsv = (df['close'] - low_list) / range_high_low * 100
     rsv.fillna(0, inplace=True)
     
+    # 东财公式 SMA(RSV, M1, 1) 中 M1=3 对应 α=1/3；EWMA 的 com=2 时 α=1/(1+com)=1/3，两者等价
     df['k'] = rsv.ewm(com=2, adjust=False).mean()
     df['d'] = df['k'].ewm(com=2, adjust=False).mean()
     df['j'] = 3 * df['k'] - 2 * df['d']
@@ -110,29 +111,28 @@ def process_stock(args):
     symbol, lookback, horizon, start_date, end_date = args
     
     try:
-        # Fetch data
+        # Fetch data (with precomputed indicators)
         df = get_stock_daily(symbol, start_date=start_date, end_date=end_date)
-        
+
         if len(df) < lookback + horizon + 30:
             return [], []
-            
-        # Calculate Indicators
-        df = calculate_kdj(df)
-        df = calculate_macd(df)
-        df = calculate_trend_lines(df)
-        
-        # Calculate Volume MA for Volume Ratio
-        df['vol_ma5'] = df['volume'].rolling(window=5).mean()
-        
-        # Drop NaNs
-        df.dropna(inplace=True)
-        
+
+        # Require precomputed indicator columns from DB
+        required_cols = ['k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
+        if any(col not in df.columns for col in required_cols):
+            # Indicators not present; skip to avoid recompute here
+            return [], []
+
+        # Drop rows with missing essentials
+        base_cols = ['open', 'high', 'low', 'close', 'volume']
+        df.dropna(subset=base_cols + required_cols, inplace=True)
+
         if df.empty:
             return [], []
-            
+
         # Reset index
         df = df.reset_index(drop=True)
-        
+
         # Find triggers: J < 13
         potential_indices = df[df['j'] < 13].index
         
@@ -143,7 +143,7 @@ def process_stock(args):
             if idx < lookback or idx >= len(df) - horizon:
                 continue
                 
-            # Extract Features
+            # Extract Features (from DB precomputed indicators)
             feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
             window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
             
@@ -229,29 +229,27 @@ def process_stock_backtest(args):
     symbol, lookback, horizon, start_date, end_date = args
     
     try:
-        # Fetch data
+        # Fetch data (with precomputed indicators)
         df = get_stock_daily(symbol, start_date=start_date, end_date=end_date)
-        
+
         if len(df) < lookback + horizon + 30:
             return [], [], []
-            
-        # Calculate Indicators
-        df = calculate_kdj(df)
-        df = calculate_macd(df)
-        df = calculate_trend_lines(df)
-        
-        # Calculate Volume MA for Volume Ratio
-        df['vol_ma5'] = df['volume'].rolling(window=5).mean()
-        
-        # Drop NaNs
-        df.dropna(inplace=True)
-        
+
+        # Require precomputed indicator columns from DB
+        required_cols = ['k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
+        if any(col not in df.columns for col in required_cols):
+            return [], [], []
+
+        # Drop rows with missing essentials
+        base_cols = ['open', 'high', 'low', 'close', 'volume']
+        df.dropna(subset=base_cols + required_cols, inplace=True)
+
         if df.empty:
             return [], [], []
-            
+
         # Reset index
         df = df.reset_index(drop=True)
-        
+
         # Find triggers: J < 13
         potential_indices = df[df['j'] < 13].index
         
@@ -263,7 +261,7 @@ def process_stock_backtest(args):
             if idx < lookback or idx >= len(df) - horizon:
                 continue
                 
-            # Extract Features
+            # Extract Features (from DB precomputed indicators)
             feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
             window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
             
