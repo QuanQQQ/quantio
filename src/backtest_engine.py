@@ -425,8 +425,8 @@ class BacktestEngine:
                     current_price = price_df.iloc[0]['close']
                     position.last_price = current_price
                 
-                # Check for horizon expiry (force close)
-                if position.hold_days >= horizon:
+                # Check for horizon expiry (force close) - only for v1
+                if self.variant == 'v1' and position.hold_days >= horizon:
                     self.portfolio.close_position(
                         position, current_price, current_date_str, 
                         f'horizon_expiry_{horizon}d', None
@@ -471,14 +471,16 @@ class BacktestEngine:
             
             if positions_to_open > 0:
                 # Get top candidates
-                candidates = daily_predictions.head(positions_to_open * 3)  # Get extra candidates
+                candidates = daily_predictions.head(positions_to_open * 5)  # More buffer for skip/advance
                 
                 # Filter out stocks we already hold
                 active_symbols = {p.symbol for p in self.portfolio.get_active_positions()}
                 candidates = candidates[~candidates['symbol'].isin(active_symbols)]
                 
+                # Filter predicted_return > 0
+                candidates = candidates[candidates['predicted_return'] > 0]
                 # Select top N
-                candidates = candidates.head(positions_to_open)
+                candidates = candidates.head(positions_to_open * 5)
                 
                 if self.variant == 'v1':
                     per_slot_capital = self.initial_capital / self.max_positions
@@ -492,13 +494,23 @@ class BacktestEngine:
                 if slots_to_open <= 0:
                     pass
                 else:
-                    # Only keep the number of candidates we can actually fund
-                    candidates = candidates.head(slots_to_open)
-                
-                    # Open positions with fixed per-slot capital
+                    opened = 0
                     for _, row in candidates.iterrows():
                         if self.portfolio.get_position_count() >= self.max_positions:
                             break
+                        if opened >= slots_to_open:
+                            break
+                        if self.variant == 'v2':
+                            try:
+                                price_df_open = self.get_daily_prices(row['symbol'], current_date_str, current_date_str)
+                                if price_df_open.empty:
+                                    continue
+                                close_val = float(price_df_open.iloc[0]['close'])
+                                long_trend_val = float(price_df_open.iloc[0]['long_trend']) if 'long_trend' in price_df_open.columns else np.nan
+                                if np.isnan(long_trend_val) or close_val < long_trend_val:
+                                    continue
+                            except Exception:
+                                continue
                         self.portfolio.open_position(
                             symbol=row['symbol'],
                             entry_date=current_date_str,
@@ -507,6 +519,7 @@ class BacktestEngine:
                             horizon=horizon,
                             capital_to_use=per_slot_capital
                         )
+                        opened += 1
             
             # Record daily equity
             # Use equity index (base=1.0) instead of cash+positions valuation
