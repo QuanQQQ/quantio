@@ -397,22 +397,31 @@ class BacktestEngine:
                 # Select top N
                 candidates = candidates.head(positions_to_open)
                 
-                # Calculate capital per position
-                available_capital = self.portfolio.cash
-                capital_per_position = available_capital / positions_to_open if positions_to_open > 0 else 0
-                # Open positions
-                for _, row in candidates.iterrows():
-                    if self.portfolio.get_position_count() >= self.max_positions:
-                        break
-                    
-                    self.portfolio.open_position(
-                        symbol=row['symbol'],
-                        entry_date=current_date_str,
-                        entry_price=row['close'],
-                        predicted_return=row['predicted_return'],
-                        horizon=horizon,
-                        capital_to_use=capital_per_position
-                    )
+                # Allocation rule: fixed 1/max_positions of initial capital per position
+                per_slot_capital = self.initial_capital / self.max_positions
+                # Determine openable slots by cash availability
+                openable_by_cash = int(self.portfolio.cash // per_slot_capital)
+                slots_to_open = min(positions_to_open, openable_by_cash)
+                
+                # If no slots can be opened due to insufficient cash, skip
+                if slots_to_open <= 0:
+                    pass
+                else:
+                    # Only keep the number of candidates we can actually fund
+                    candidates = candidates.head(slots_to_open)
+                
+                    # Open positions with fixed per-slot capital
+                    for _, row in candidates.iterrows():
+                        if self.portfolio.get_position_count() >= self.max_positions:
+                            break
+                        self.portfolio.open_position(
+                            symbol=row['symbol'],
+                            entry_date=current_date_str,
+                            entry_price=row['close'],
+                            predicted_return=row['predicted_return'],
+                            horizon=horizon,
+                            capital_to_use=per_slot_capital
+                        )
             
             # Record daily equity
             current_prices = {row['symbol']: row['close'] 
