@@ -10,6 +10,18 @@ TOKEN = '72e098f1a916bb0ecc08ba3165108f3116bf00c3b493a405d00f6940'
 ts.set_token(TOKEN)
 pro = ts.pro_api()
 
+def get_trading_dates(start_date: str, end_date: str) -> list:
+    """Fetch trading dates from Tushare trade calendar. Returns list of 'YYYYMMDD'."""
+    try:
+        cal = pro.trade_cal(exchange='', start_date=start_date, end_date=end_date, is_open=1)
+        if cal is None or cal.empty:
+            print(f"Warning: trade_cal returned empty for {start_date}-{end_date}, fallback to natural dates.")
+            return []
+        return cal['cal_date'].astype(str).tolist()
+    except Exception as e:
+        print(f"Error fetching trade calendar: {e}. Fallback to natural dates.")
+        return []
+
 def fetch_stock_list():
     """
     Fetch all A-share stocks list using Tushare.
@@ -98,6 +110,22 @@ def get_date_row_count(date: str) -> int:
     finally:
         conn.close()
 
+def get_counts_by_date_range(start_date: str, end_date: str):
+    """Return dict: {date: rows_count} for dates within [start_date, end_date]."""
+    import sqlite3
+    conn = sqlite3.connect('data/stock_data.db')
+    try:
+        df = pd.read_sql(
+            'SELECT date, COUNT(*) AS rows_count FROM daily_prices WHERE date BETWEEN ? AND ? GROUP BY date',
+            conn,
+            params=(start_date, end_date)
+        )
+        return {row['date']: int(row['rows_count']) for _, row in df.iterrows()}
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+
 def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop_func=None, min_rows_per_day=3000):
     """
     Main function to update all data (Time-based iteration).
@@ -120,23 +148,24 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
     end_date = datetime.now()
     start_date = end_date - timedelta(days=365*lookback_years)
     
-    # Generate all dates in range
-    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-    all_dates = [d.strftime("%Y%m%d") for d in date_range]
+    # Generate trading dates in range (prefer trade calendar)
+    start_str = start_date.strftime('%Y%m%d')
+    end_str = end_date.strftime('%Y%m%d')
+    trading_dates = get_trading_dates(start_str, end_str)
+    using_trade_calendar = True
+    if trading_dates:
+        all_dates = trading_dates
+    else:
+        using_trade_calendar = False
+        date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+        all_dates = [d.strftime("%Y%m%d") for d in date_range]
     
     # Filter out existing dates (date-level presence) and detect incomplete dates (row count below threshold)
     print("Checking existing data...")
-    existing_dates = get_existing_dates()
-    missing_dates = [d for d in all_dates if d not in existing_dates]
-    # Even if a date exists, it may be partially saved (e.g., API hiccup). Re-fetch incomplete dates.
-    incomplete_dates = []
-    for d in all_dates:
-        # Skip future dates
-        if d > datetime.now().strftime('%Y%m%d'):
-            continue
-        cnt = get_date_row_count(d)
-        if cnt > 0 and cnt < min_rows_per_day:
-            incomplete_dates.append(d)
+    now_str = datetime.now().strftime('%Y%m%d')
+    counts_map = get_counts_by_date_range(all_dates[0], all_dates[-1])
+    missing_dates = [d for d in all_dates if d not in counts_map]
+    incomplete_dates = [d for d in all_dates if (d in counts_map and counts_map[d] < min_rows_per_day and d <= now_str)]
     # Union sets
     dates_to_fetch = sorted(set(missing_dates + incomplete_dates))
     
@@ -199,9 +228,9 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
                     print(f"  Fetched {date}: {len(df)} records.")
                     total_records_saved += len(df)
                 else:
-                    # Likely a non-trading day
-                    # print(f"  No data for {date} (Non-trading day?)")
-                    pass
+                    if using_trade_calendar:
+                        print(f"WARNING: No data returned for trading day {date}.")
+                    # Else, likely a non-trading day
             except Exception as e:
                 print(f"  Error fetching {date}: {e}")
                 time.sleep(1)
