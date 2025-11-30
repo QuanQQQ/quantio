@@ -81,7 +81,23 @@ def get_existing_dates():
     finally:
         conn.close()
 
-def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop_func=None):
+def get_date_row_count(date: str) -> int:
+    """
+    Get row count in daily_prices for a specific date (YYYYMMDD).
+    """
+    import sqlite3
+    conn = sqlite3.connect('data/stock_data.db')
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT COUNT(*) FROM daily_prices WHERE date = ?", (date,))
+        cnt = cursor.fetchone()[0]
+        return int(cnt or 0)
+    except Exception:
+        return 0
+    finally:
+        conn.close()
+
+def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop_func=None, min_rows_per_day=3000):
     """
     Main function to update all data (Time-based iteration).
     """
@@ -107,18 +123,30 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
     date_range = pd.date_range(start=start_date, end=end_date, freq='D')
     all_dates = [d.strftime("%Y%m%d") for d in date_range]
     
-    # Filter out existing dates
+    # Filter out existing dates (date-level presence) and detect incomplete dates (row count below threshold)
     print("Checking existing data...")
     existing_dates = get_existing_dates()
     missing_dates = [d for d in all_dates if d not in existing_dates]
+    # Even if a date exists, it may be partially saved (e.g., API hiccup). Re-fetch incomplete dates.
+    incomplete_dates = []
+    for d in all_dates:
+        # Skip future dates
+        if d > datetime.now().strftime('%Y%m%d'):
+            continue
+        cnt = get_date_row_count(d)
+        if cnt > 0 and cnt < min_rows_per_day:
+            incomplete_dates.append(d)
+    # Union sets
+    dates_to_fetch = sorted(set(missing_dates + incomplete_dates))
     
     # Filter out future dates (if any) and weekends (Tushare might handle, but good to skip if we know)
     # Actually Tushare returns empty for non-trading days, so it's fine to try fetching.
     # But to save API calls, we could use a trading calendar. 
     # For now, let's just try fetching all missing dates.
     
-    total_days = len(missing_dates)
-    print(f"Found {total_days} missing days to fetch out of {len(all_dates)} days in range.")
+    total_days = len(dates_to_fetch)
+    print(f"Found {len(missing_dates)} missing days and {len(incomplete_dates)} incomplete days.")
+    print(f"Total days scheduled to fetch: {total_days} (out of {len(all_dates)} days in range).")
     
     if total_days == 0:
         print("All data up to date.")
@@ -129,7 +157,7 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
     # Process in batches of 20 days
     batch_size = 20
     # Sort missing dates to fetch in order
-    missing_dates.sort()
+    dates_to_fetch.sort()
     
     for i in range(0, total_days, batch_size):
         # Check stop condition
@@ -137,7 +165,7 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
             print("Update stopped by user.")
             return
 
-        batch_dates = missing_dates[i:i+batch_size]
+        batch_dates = dates_to_fetch[i:i+batch_size]
         
         if progress_callback:
             progress = min(i / total_days, 1.0)
@@ -151,7 +179,7 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
             try:
                 # Fetch all stocks for this date
                 # rate limit
-                time.sleep(0.2) 
+                time.sleep(0.2)
                 
                 df = pro.daily(trade_date=date)
                 
