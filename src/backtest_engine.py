@@ -365,10 +365,12 @@ class BacktestEngine:
             if above_short:
                 position.short_above_seen = True
             if below_short:
-                position.short_below_hits += 1
-                # Second time breach -> full close immediately
-                if position.short_below_hits >= 2:
-                    return ('short_trend_break_2x', None)
+                # Only count short-trend breaches after price has stood above short trend at least once
+                if position.short_above_seen:
+                    position.short_below_hits += 1
+                    # Second time breach -> full close immediately
+                    if position.short_below_hits >= 2:
+                        return ('short_trend_break_2x', None)
 
             # Stop-loss first (priority over take-profit)
             below_long = False
@@ -433,8 +435,14 @@ class BacktestEngine:
         
         # Track daily metrics
         end_date_str = end_dt.strftime('%Y%m%d')
-        for current_date in trading_dates:
+        for i, current_date in enumerate(trading_dates):
             current_date_str = current_date.strftime('%Y%m%d')
+            next_date_str = None
+            if i + 1 < len(trading_dates):
+                try:
+                    next_date_str = trading_dates[i+1].strftime('%Y%m%d')
+                except Exception:
+                    next_date_str = None
             
             # Update hold days
             self.portfolio.increment_hold_days()
@@ -525,31 +533,38 @@ class BacktestEngine:
                     pass
                 else:
                     opened = 0
-                    for _, row in candidates.iterrows():
-                        if self.portfolio.get_position_count() >= self.max_positions:
-                            break
-                        if opened >= slots_to_open:
-                            break
-                        if self.variant == 'v2':
+                    # If there is no next trading date (e.g., last day), skip opening
+                    if next_date_str is None:
+                        pass
+                    else:
+                        for _, row in candidates.iterrows():
+                            if self.portfolio.get_position_count() >= self.max_positions:
+                                break
+                            if opened >= slots_to_open:
+                                break
+                            # Fetch next-day open and long_trend for buy-time checks
                             try:
-                                price_df_open = self.get_daily_prices(row['symbol'], current_date_str, current_date_str)
+                                price_df_open = self.get_daily_prices(row['symbol'], next_date_str, next_date_str)
                                 if price_df_open.empty:
                                     continue
-                                close_val = float(price_df_open.iloc[0]['close'])
-                                long_trend_val = float(price_df_open.iloc[0]['long_trend']) if 'long_trend' in price_df_open.columns else np.nan
-                                if np.isnan(long_trend_val) or close_val < long_trend_val:
-                                    continue
+                                open_val = float(price_df_open.iloc[0]['open']) if 'open' in price_df_open.columns else float(price_df_open.iloc[0]['close'])
+                                if self.variant == 'v2':
+                                    long_trend_val = float(price_df_open.iloc[0]['long_trend']) if 'long_trend' in price_df_open.columns else np.nan
+                                    # Require long_trend available and price above it at buy time
+                                    if np.isnan(long_trend_val) or open_val < long_trend_val:
+                                        continue
                             except Exception:
                                 continue
-                        self.portfolio.open_position(
-                            symbol=row['symbol'],
-                            entry_date=current_date_str,
-                            entry_price=row['close'],
-                            predicted_return=row['predicted_return'],
-                            horizon=horizon,
-                            capital_to_use=per_slot_capital
-                        )
-                        opened += 1
+
+                            self.portfolio.open_position(
+                                symbol=row['symbol'],
+                                entry_date=next_date_str,
+                                entry_price=open_val,
+                                predicted_return=row['predicted_return'],
+                                horizon=horizon,
+                                capital_to_use=per_slot_capital
+                            )
+                            opened += 1
             
             # Record daily equity
             # Use equity index (base=1.0) instead of cash+positions valuation

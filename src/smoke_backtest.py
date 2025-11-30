@@ -59,7 +59,8 @@ def main():
         {'date': '20230106', 'close': 102.0, 'short_trend': 104.0, 'long_trend': 103.0},  # below long_trend → stop-loss
     ]
     daily_rows_CCC = [
-        {'date': '20230102', 'close': 20.0, 'short_trend': 19.0, 'long_trend': 19.5},  # close > long_trend → allow buy
+        {'date': '20230102', 'close': 20.0, 'open': 20.0, 'short_trend': 19.0, 'long_trend': 19.5},  # signal day
+        {'date': '20230103', 'close': 20.0, 'open': 20.0, 'short_trend': 19.0, 'long_trend': 19.5},  # buy day
     ]
 
     engine_v2 = MockBacktestEngine(initial_capital=100000, max_positions=5, stop_loss_pct=-5.0, take_profit_buffer=5.0, variant='v2')
