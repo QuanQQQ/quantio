@@ -34,7 +34,7 @@ def _to_dt(s: str) -> datetime:
 def _to_str(dt: datetime) -> str:
     return dt.strftime('%Y%m%d')
 
-def verify_db_coverage(years: int = 3, min_coverage: float = 0.95, filter_tradable: bool = True, top_n: int = 20):
+def verify_db_coverage(years: int = 20, min_coverage: float = 0.95, filter_tradable: bool = False, top_n: int = 20):
     conn = sqlite3.connect(DB_PATH)
     try:
         mn, mx = _get_min_max_date(conn)
@@ -67,7 +67,7 @@ def verify_db_coverage(years: int = 3, min_coverage: float = 0.95, filter_tradab
                 code = symbol.split('.')[0]
                 if code.startswith('300') or code.startswith('688'):
                     return False
-                if len(code) == 6 and code[0] in ['8', '4']:
+                if code.endswith('BJ'):
                     return False
                 return True
             stocks_df = stocks_df[stocks_df['symbol'].apply(is_tradable)]
@@ -121,7 +121,7 @@ def verify_db_coverage(years: int = 3, min_coverage: float = 0.95, filter_tradab
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Verify DB coverage for near X years')
-    parser.add_argument('--years', type=int, default=3, help='Years to check, counting back from latest DB date')
+    parser.add_argument('--years', type=int, default=20, help='Years to check, counting back from latest DB date')
     parser.add_argument('--min-coverage', type=float, default=0.95, help='Minimum acceptable coverage ratio')
     parser.add_argument('--top-n', type=int, default=20, help='Show top N worst stocks')
     parser.add_argument('--no-filter', action='store_true', help='Do not filter out ChiNext/STAR/BSE')
