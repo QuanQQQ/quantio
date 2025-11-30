@@ -8,6 +8,7 @@ import EquityChart from './components/EquityChart'
 import KlineChart from './components/KlineChart'
 import HoldingsTable from './components/HoldingsTable'
 import IndicatorsPanel from './components/IndicatorsPanel'
+import OperationsTable from './components/OperationsTable'
 
 const { Header, Content, Footer } = Layout
 
@@ -36,7 +37,10 @@ export default function App() {
           </div>
         </Content>
         <Footer style={{ background: '#fff' }}>
-          <HoldingsTable />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <HoldingsTable />
+            <OperationsTable />
+          </div>
         </Footer>
       </Layout>
     </ConfigProvider>

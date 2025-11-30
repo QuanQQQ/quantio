@@ -41,3 +41,19 @@ export async function fetchKline(symbol: string, start?: string, end?: string) {
   const data = await res.json()
   return data as { date: string; open: number; high: number; low: number; close: number; volume: number }[]
 }
+
+export async function fetchOperations() {
+  const res = await fetch('/api/operations')
+  const data = await res.json()
+  return (data as any[]).map((d) => ({
+    date: String(d.date),
+    action: String(d.action),
+    symbol: String(d.symbol),
+    price: Number(d.price),
+    quantity: Number(d.quantity),
+    reason: d.reason ? String(d.reason) : '',
+    partial_ratio: d.partial_ratio !== undefined ? Number(d.partial_ratio) : undefined,
+    hold_days: d.hold_days !== undefined ? Number(d.hold_days) : undefined,
+    predicted_return: d.predicted_return !== undefined ? Number(d.predicted_return) : undefined,
+  }))
+}
