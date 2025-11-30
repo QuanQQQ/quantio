@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import time
 from database import init_db, save_stocks, save_daily_data, get_last_date, get_all_stocks
+from tqdm import tqdm
 
 # Initialize Tushare
 TOKEN = '72e098f1a916bb0ecc08ba3165108f3116bf00c3b493a405d00f6940'
@@ -159,6 +160,9 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
     # Sort missing dates to fetch in order
     dates_to_fetch.sort()
     
+    processed_days = 0
+    total_records_saved = 0
+    pb = tqdm(total=total_days, desc="Fetching days", unit="day")
     for i in range(0, total_days, batch_size):
         # Check stop condition
         if should_stop_func and should_stop_func():
@@ -193,6 +197,7 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
                     df = df[['symbol', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount']]
                     batch_df_list.append(df)
                     print(f"  Fetched {date}: {len(df)} records.")
+                    total_records_saved += len(df)
                 else:
                     # Likely a non-trading day
                     # print(f"  No data for {date} (Non-trading day?)")
@@ -200,12 +205,18 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
             except Exception as e:
                 print(f"  Error fetching {date}: {e}")
                 time.sleep(1)
-        
+            processed_days += 1
+            pb.update(1)
+
         # Save batch
         if batch_df_list:
             full_batch_df = pd.concat(batch_df_list, ignore_index=True)
             save_daily_data(full_batch_df)
             print(f"  Saved {len(full_batch_df)} records for batch.")
+        else:
+            print("  No records in this batch (likely non-trading days).")
+    pb.close()
+    print(f"Completed: {processed_days}/{total_days} days processed. Total records saved: {total_records_saved}")
             
     if progress_callback:
         progress_callback(1.0, "Update complete!")
