@@ -156,6 +156,12 @@ def run_backtest(config=None, start_date=None, end_date=None, strategy='simple',
             equity_df = engine.get_equity_curve()
             equity_df.to_csv("backtest_equity_curve.csv", index=False)
             print("Equity curve saved to backtest_equity_curve.csv")
+
+            # Save daily operations (buy/sell)
+            ops_df = engine.get_operations_log()
+            if not ops_df.empty:
+                ops_df.to_csv("backtest_operations.csv", index=False)
+                print("Operations log saved to backtest_operations.csv")
         
     else:
         # Simple Strategy: Buy Top 5 Daily and Hold for Horizon Days

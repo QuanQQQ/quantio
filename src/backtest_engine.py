@@ -40,6 +40,7 @@ class Position:
         self.horizon = horizon
         self.hold_days = 0
         self.trades = []  # List of trade records
+        self.take_profit_done = False  # Only allow one partial take-profit
         
     def get_unrealized_pnl(self, current_price: float) -> float:
         """Calculate unrealized P&L percentage."""
@@ -80,6 +81,8 @@ class Position:
         }
         
         self.quantity -= sell_quantity
+        if reason == 'take_profit':
+            self.take_profit_done = True
         self.trades.append(trade)
         return trade
     
@@ -130,6 +133,7 @@ class PortfolioManager:
         self.positions: List[Position] = []
         self.closed_trades: List[Dict] = []
         self.daily_equity = []
+        self.operations = []  # Daily buy/sell operations log
         
     def get_active_positions(self) -> List[Position]:
         """Get all active (non-closed) positions."""
@@ -180,7 +184,17 @@ class PortfolioManager:
         
         self.positions.append(position)
         self.cash -= capital_to_use
-        
+        # Record buy operation
+        self.operations.append({
+            'date': entry_date,
+            'action': 'buy',
+            'symbol': symbol,
+            'price': entry_price,
+            'quantity': quantity,
+            'reason': 'open',
+            'predicted_return': predicted_return
+        })
+
         return position
     
     def close_position(self, position: Position, exit_price: float, 
@@ -203,6 +217,17 @@ class PortfolioManager:
             self.cash += trade['quantity'] * exit_price
         
         self.closed_trades.append(trade)
+        # Record sell operation
+        self.operations.append({
+            'date': exit_date,
+            'action': 'sell',
+            'symbol': position.symbol,
+            'price': exit_price,
+            'quantity': trade['quantity'],
+            'reason': reason,
+            'partial_ratio': (partial_ratio if partial_ratio is not None else 1.0),
+            'hold_days': position.hold_days,
+        })
     
     def increment_hold_days(self):
         """Increment hold days for all active positions."""
@@ -269,9 +294,9 @@ class BacktestEngine:
         if unrealized_pnl <= self.stop_loss_pct:
             return ('stop_loss', None)  # Sell all
         
-        # Check take profit
+        # Check take profit (only once)
         take_profit_threshold = position.predicted_return + self.take_profit_buffer
-        if unrealized_pnl >= take_profit_threshold:
+        if (not position.take_profit_done) and unrealized_pnl >= take_profit_threshold:
             return ('take_profit', 0.5)  # Sell half
         
         return None
@@ -419,6 +444,10 @@ class BacktestEngine:
     def get_equity_curve(self) -> pd.DataFrame:
         """Get the equity curve over time."""
         return pd.DataFrame(self.portfolio.daily_equity)
+
+    def get_operations_log(self) -> pd.DataFrame:
+        """Get daily buy/sell operations log."""
+        return pd.DataFrame(self.portfolio.operations)
     
     def print_summary(self):
         """Print backtest summary statistics."""
