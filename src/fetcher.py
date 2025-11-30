@@ -81,6 +81,22 @@ def fetch_daily_data_batch(symbols, start_date, end_date):
         print(f"Error fetching batch data: {e}")
         return pd.DataFrame()
 
+def fetch_daily_for_symbol(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Fetch daily OHLCV for a single symbol between [start_date, end_date]."""
+    try:
+        df = pro.daily(ts_code=symbol, start_date=start_date, end_date=end_date)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.rename(columns={
+            'ts_code': 'symbol',
+            'trade_date': 'date',
+            'vol': 'volume'
+        })
+        df = df[['symbol', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount']]
+        return df
+    except Exception:
+        return pd.DataFrame()
+
 def get_existing_dates():
     """
     Get all dates that already exist in the daily_prices table.
@@ -302,3 +318,94 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     update_all(lookback_years=args.years, limit=args.limit)
+
+def update_by_symbols(start_date: str = None, end_date: str = None, years: int = 2,
+                      limit: int = None, workers: int = 4, write_chunk_rows: int = 300000,
+                      filter_tradable: bool = True):
+    """
+    Re-fetch daily data per symbol (parallel), then batch write to DB via a single writer.
+    - Fetch is per-symbol using Tushare pro.daily(ts_code=...)
+    - Writes are aggregated and flushed in chunks to avoid SQLite lock contention
+    """
+    init_db()
+
+    # Resolve date range
+    if not (start_date and end_date):
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=365 * years)
+        start_date = start_dt.strftime('%Y%m%d')
+        end_date = end_dt.strftime('%Y%m%d')
+
+    # Prepare symbols
+    stocks_df = get_all_stocks(filter_tradable=filter_tradable)
+    symbols = stocks_df['symbol'].tolist()
+    if limit:
+        symbols = symbols[:limit]
+    if not symbols:
+        print('No symbols to update.')
+        return
+
+    print(f'Fetching by symbols: {len(symbols)} symbols, {start_date} ~ {end_date}, workers={workers}')
+
+    # Parallel fetch; single writer aggregation
+    import multiprocessing as mp
+    workers = max(1, min(workers, mp.cpu_count()))
+
+    def task(sym: str):
+        df = fetch_daily_for_symbol(sym, start_date, end_date)
+        return sym, df
+
+    total_inserted = 0
+    buffer_rows = []
+    buffer_count = 0
+
+    def flush_buffer():
+        nonlocal buffer_rows, buffer_count, total_inserted
+        if not buffer_rows:
+            return
+        merged = pd.concat(buffer_rows, ignore_index=True)
+        inserted = save_daily_data(merged)
+        total_inserted += (inserted or 0)
+        buffer_rows = []
+        buffer_count = 0
+
+    try:
+        with mp.Pool(processes=workers) as pool:
+            for sym, df in tqdm(pool.imap_unordered(task, symbols, chunksize=16), total=len(symbols), unit='sym', desc='Fetch symbols'):
+                if df is None or df.empty:
+                    continue
+                buffer_rows.append(df)
+                buffer_count += len(df)
+                if buffer_count >= write_chunk_rows:
+                    flush_buffer()
+    except Exception as e:
+        print(f'Parallel fetch failed: {e}. Falling back to single process.')
+        for sym in tqdm(symbols, unit='sym', desc='Fetch symbols (single)'):
+            df = fetch_daily_for_symbol(sym, start_date, end_date)
+            if df is None or df.empty:
+                continue
+            buffer_rows.append(df)
+            buffer_count += len(df)
+            if buffer_count >= write_chunk_rows:
+                flush_buffer()
+
+    flush_buffer()
+    print(f'Total inserted rows: {total_inserted}')
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Fetch and update A-share stock data.")
+    parser.add_argument("--years", "-y", type=int, default=2, help="Number of years of historical data to fetch (default: 2)")
+    parser.add_argument("--limit", "-l", type=int, default=None, help="Limit number of stocks to update (for testing)")
+    parser.add_argument("--mode", type=str, default="by_dates", choices=["by_dates","by_symbols"], help="Fetch mode: by_dates (existing) or by_symbols (parallel per-symbol)")
+    parser.add_argument("--start", type=str, help="Start date YYYYMMDD (for by_symbols mode)")
+    parser.add_argument("--end", type=str, help="End date YYYYMMDD (for by_symbols mode)")
+    parser.add_argument("--workers", type=int, default=4, help="Parallel workers for by_symbols mode")
+    parser.add_argument("--write-chunk-rows", type=int, default=300000, help="Flush writes when buffer reaches this many rows")
+    args = parser.parse_args()
+
+    if args.mode == "by_symbols":
+        update_by_symbols(start_date=args.start, end_date=args.end, years=args.years, limit=args.limit,
+                          workers=args.workers, write_chunk_rows=args.write_chunk_rows, filter_tradable=False)
+    else:
+        update_all(lookback_years=args.years, limit=args.limit)

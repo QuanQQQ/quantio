@@ -24,6 +24,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from src.database import get_stock_daily
+from src.fetcher import pro
 
 
 class Position:
@@ -257,6 +258,33 @@ class BacktestEngine:
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_buffer = take_profit_buffer
         self.portfolio = PortfolioManager(initial_capital, max_positions)
+        # Cache for delisting detection via interface
+        self._delisted_cache: Dict[str, bool] = {}
+
+    def is_delisted(self, symbol: str, current_date: str, end_date: str) -> bool:
+        """
+        Determine if a symbol is delisted using interface (Tushare stock_basic).
+        Falls back to heuristic (no future prices in DB) when API fails.
+        Results are cached per symbol.
+        """
+        if symbol in self._delisted_cache:
+            return self._delisted_cache[symbol]
+        delisted = False
+        try:
+            df = pro.stock_basic(ts_code=symbol, fields='ts_code,list_status')
+            if df is not None and not df.empty:
+                status = str(df.iloc[0]['list_status']).upper()
+                # Tushare list_status: L(上市), D(退市), P(暂停上市)
+                delisted = (status == 'D')
+        except Exception:
+            # Fallback heuristic if API error
+            try:
+                df_future = self.get_daily_prices(symbol, current_date, end_date)
+                delisted = df_future.empty
+            except Exception:
+                delisted = False
+        self._delisted_cache[symbol] = delisted
+        return delisted
         
     def get_daily_prices(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
@@ -340,6 +368,7 @@ class BacktestEngine:
         print(f"Initial Capital: ${self.initial_capital:,.2f}\n")
         
         # Track daily metrics
+        end_date_str = end_dt.strftime('%Y%m%d')
         for current_date in trading_dates:
             current_date_str = current_date.strftime('%Y%m%d')
             
@@ -351,8 +380,15 @@ class BacktestEngine:
                 # Get current price
                 price_df = self.get_daily_prices(position.symbol, current_date_str, current_date_str)
                 if price_df.empty:
-                    # Fallback to last known price to avoid artificial equity drops
-                    current_price = position.last_price
+                    # If no price today: use interface to check delisting.
+                    if self.is_delisted(position.symbol, current_date_str, end_date_str):
+                        self.portfolio.close_position(
+                            position, position.last_price, current_date_str,
+                            'delisted', None
+                        )
+                        continue
+                    else:
+                        current_price = position.last_price
                 else:
                     current_price = price_df.iloc[0]['close']
                     position.last_price = current_price
@@ -447,10 +483,12 @@ class BacktestEngine:
             price_df = self.get_daily_prices(position.symbol, final_date_str, final_date_str)
             if not price_df.empty:
                 final_price = price_df.iloc[0]['close']
-                self.portfolio.close_position(
-                    position, final_price, final_date_str,
-                    'backtest_end', None
-                )
+            else:
+                final_price = position.last_price
+            self.portfolio.close_position(
+                position, final_price, final_date_str,
+                'backtest_end', None
+            )
         
         # Return results
         trades_df = pd.DataFrame(self.portfolio.closed_trades)
