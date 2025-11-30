@@ -45,6 +45,8 @@ class Position:
         self.take_profit_done = False  # Only allow one partial take-profit
         self.short_below_hits = 0      # Count of days price < short_trend since entry
         self.short_above_seen = False  # Has price ever been >= short_trend since entry
+        self.pending_exit_next_open = False  # If true, will exit at next day's open
+        self.pending_exit_reason: Optional[str] = None
         
     def get_unrealized_pnl(self, current_price: float) -> float:
         """Calculate unrealized P&L percentage."""
@@ -464,6 +466,20 @@ class BacktestEngine:
                 else:
                     current_price = price_df.iloc[0]['close']
                     position.last_price = current_price
+
+                # Execute any pending next-open exit BEFORE other checks
+                if position.pending_exit_next_open:
+                    try:
+                        exit_price = float(price_df.iloc[0]['open']) if 'open' in price_df.columns else current_price
+                    except Exception:
+                        exit_price = current_price
+                    self.portfolio.close_position(
+                        position, exit_price, current_date_str,
+                        position.pending_exit_reason or 'stop_loss_next_open', None
+                    )
+                    position.pending_exit_next_open = False
+                    position.pending_exit_reason = None
+                    continue
                 
                 # Check for horizon expiry (force close) - only for v1
                 if self.variant == 'v1' and position.hold_days >= horizon:
@@ -556,7 +572,7 @@ class BacktestEngine:
                             except Exception:
                                 continue
 
-                            self.portfolio.open_position(
+                            pos_obj = self.portfolio.open_position(
                                 symbol=row['symbol'],
                                 entry_date=next_date_str,
                                 entry_price=open_val,
@@ -565,6 +581,25 @@ class BacktestEngine:
                                 capital_to_use=per_slot_capital
                             )
                             opened += 1
+
+                            # If opened successfully, evaluate BUY-DAY stop-loss conditions and schedule next-open exit if triggered
+                            if pos_obj is not None:
+                                try:
+                                    # Use buy-day close to detect immediate stop-loss triggers
+                                    buy_day_close = float(price_df_open.iloc[0]['close']) if 'close' in price_df_open.columns else open_val
+                                    unrealized_pnl_buy_day = (buy_day_close - open_val) / open_val * 100.0
+                                    long_trend_buy_day = float(price_df_open.iloc[0]['long_trend']) if 'long_trend' in price_df_open.columns else np.nan
+                                    trigger_stop = False
+                                    if self.variant == 'v2':
+                                        trigger_stop = (unrealized_pnl_buy_day <= self.stop_loss_pct) or (not np.isnan(long_trend_buy_day) and buy_day_close < long_trend_buy_day)
+                                    else:
+                                        trigger_stop = (unrealized_pnl_buy_day <= self.stop_loss_pct)
+                                    if trigger_stop:
+                                        pos_obj.pending_exit_next_open = True
+                                        pos_obj.pending_exit_reason = 'stop_loss_next_open'
+                                except Exception:
+                                    # Non-blocking
+                                    pass
             
             # Record daily equity
             # Use equity index (base=1.0) instead of cash+positions valuation
