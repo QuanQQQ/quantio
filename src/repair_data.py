@@ -147,7 +147,7 @@ def purge_non_trading_rows(start: Optional[str], end: Optional[str], use_calenda
     finally:
         conn.close()
 
-def detect_and_repair(symbols: List[str], start: Optional[str], end: Optional[str], method: str = 'refetch', use_calendar: bool = True):
+def detect_and_repair(symbols: List[str], start: Optional[str], end: Optional[str], method: str = 'refetch', use_calendar: bool = True, workers: int = 4, write_chunk_rows: int = 300000):
     # Prepare trading dates
     if use_calendar:
         s = start or '00000000'
@@ -172,42 +172,58 @@ def detect_and_repair(symbols: List[str], start: Optional[str], end: Optional[st
         tdates = [fmt(d) for d in pd.date_range(start=start_dt, end=end_dt, freq='D')]
 
     total_inserted = 0
+    buffer_rows_count = 0
     buffer_dfs = []
-    BATCH_SIZE = 50  # Number of symbols to buffer before writing
-    
-    pb = tqdm(symbols, desc='Repair symbols', unit='sym')
-    for sym in pb:
-        present_df = get_symbol_dates(sym, start, end)
-        present_dates = set(present_df['date'].tolist()) if not present_df.empty else set()
-        missing = [d for d in tdates if d not in present_dates]
-        if not missing:
-            # pb.write(f'{sym}: OK (no missing)')
-            continue
-        
-        # pb.write(f'{sym}: missing {len(missing)} days')
-        
-        if method == 'refetch':
-            df_new = refetch_missing(sym, start or tdates[0], end or tdates[-1], missing)
-            if df_new is not None and not df_new.empty:
-                buffer_dfs.append(df_new)
-                # pb.write(f'  queued {len(df_new)} rows for {sym}')
-        
-        # Check buffer size
-        if len(buffer_dfs) >= BATCH_SIZE:
-            combined_df = pd.concat(buffer_dfs, ignore_index=True)
-            inserted_count = save_daily_data(combined_df) or 0
-            total_inserted += inserted_count
-            pb.write(f'  [Batch Write] Saved {inserted_count} rows from {len(buffer_dfs)} symbols')
-            buffer_dfs = []
-            
-    # Flush remaining buffer
-    if buffer_dfs:
+
+    def flush_buffer(log_prefix: str = 'Batch'):
+        nonlocal buffer_dfs, buffer_rows_count, total_inserted
+        if not buffer_dfs:
+            return
         combined_df = pd.concat(buffer_dfs, ignore_index=True)
         inserted_count = save_daily_data(combined_df) or 0
         total_inserted += inserted_count
-        pb.write(f'  [Final Write] Saved {inserted_count} rows from {len(buffer_dfs)} symbols')
-        
-    pb.close()
+        print(f'  [{log_prefix} Write] Saved {inserted_count} rows from {len(buffer_dfs)} symbols')
+        buffer_dfs = []
+        buffer_rows_count = 0
+
+    import multiprocessing as mp
+    workers = max(1, min(workers, mp.cpu_count()))
+
+    def task(sym: str):
+        try:
+            present_df = get_symbol_dates(sym, start, end)
+            present_dates = set(present_df['date'].tolist()) if not present_df.empty else set()
+            missing = [d for d in tdates if d not in present_dates]
+            if not missing:
+                return sym, None
+            df_new = refetch_missing(sym, start or tdates[0], end or tdates[-1], missing)
+            if df_new is not None and not df_new.empty:
+                return sym, df_new
+            return sym, None
+        except Exception:
+            return sym, None
+
+    try:
+        with mp.Pool(processes=workers) as pool:
+            for sym, df_new in tqdm(pool.imap_unordered(task, symbols, chunksize=16), total=len(symbols), unit='sym', desc='Repair symbols'):
+                if df_new is None or df_new.empty:
+                    continue
+                buffer_dfs.append(df_new)
+                buffer_rows_count += len(df_new)
+                if buffer_rows_count >= write_chunk_rows:
+                    flush_buffer('Batch')
+    except Exception as e:
+        print(f'Parallel repair failed ({e}), falling back to single process.')
+        for sym in tqdm(symbols, unit='sym', desc='Repair symbols (single)'):
+            _, df_new = task(sym)
+            if df_new is None or df_new.empty:
+                continue
+            buffer_dfs.append(df_new)
+            buffer_rows_count += len(df_new)
+            if buffer_rows_count >= write_chunk_rows:
+                flush_buffer('Batch')
+
+    flush_buffer('Final')
     print(f'Total inserted: {total_inserted}')
 
 def main():
@@ -222,6 +238,8 @@ def main():
     parser.add_argument('--purge', action='store_true', help='Purge non-trading day rows after refetch')
     parser.add_argument('--no-calendar', action='store_true', help='Do not use trading calendar (natural dates)')
     parser.add_argument('--no-filter', action='store_true', help='Do not filter ChiNext/STAR/BSE')
+    parser.add_argument('--workers', type=int, default=4, help='Parallel workers for repair')
+    parser.add_argument('--write-chunk-rows', type=int, default=300000, help='Flush writes when buffer reaches this many rows')
     args = parser.parse_args()
 
     start, end = resolve_date_range(args.start, args.end, args.years)
@@ -234,7 +252,10 @@ def main():
     if args.limit:
         syms = syms[:args.limit]
     print(f'Processing {len(syms)} symbols, date range {start or "MIN"}~{end or "MAX"}, method={args.method}')
-    detect_and_repair(syms, start, end, method=args.method, use_calendar=not args.no_calendar)
+    # Add parallel args with defaults
+    workers = getattr(args, 'workers', 4)
+    write_chunk_rows = getattr(args, 'write_chunk_rows', 300000)
+    detect_and_repair(syms, start, end, method=args.method, use_calendar=not args.no_calendar, workers=workers, write_chunk_rows=write_chunk_rows)
     if args.purge:
         print('Purging non-trading day rows ...')
         deleted = purge_non_trading_rows(start, end, use_calendar=not args.no_calendar)
