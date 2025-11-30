@@ -17,7 +17,10 @@ def get_trading_dates(start_date: str, end_date: str) -> list:
         if cal is None or cal.empty:
             print(f"Warning: trade_cal returned empty for {start_date}-{end_date}, fallback to natural dates.")
             return []
-        return cal['cal_date'].astype(str).tolist()
+        # Ensure ascending order and uniqueness
+        dates = cal['cal_date'].astype(str).tolist()
+        dates = sorted(set(dates))
+        return dates
     except Exception as e:
         print(f"Error fetching trade calendar: {e}. Fallback to natural dates.")
         return []
@@ -120,6 +123,8 @@ def get_counts_by_date_range(start_date: str, end_date: str):
             conn,
             params=(start_date, end_date)
         )
+        # Debug: print result length
+        print(f"[DEBUG] get_counts_by_date_range rows={len(df)} for {start_date}~{end_date}")
         return {row['date']: int(row['rows_count']) for _, row in df.iterrows()}
     except Exception:
         return {}
@@ -152,6 +157,13 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
     start_str = start_date.strftime('%Y%m%d')
     end_str = end_date.strftime('%Y%m%d')
     trading_dates = get_trading_dates(start_str, end_str)
+    # Debug: print trading calendar fetch summary
+    try:
+        print(f"[DEBUG] Trading calendar {start_str}~{end_str}: count={len(trading_dates)}")
+        if trading_dates:
+            print(f"[DEBUG] First={trading_dates[0]} Last={trading_dates[-1]}")
+    except Exception:
+        pass
     using_trade_calendar = True
     if trading_dates:
         all_dates = trading_dates

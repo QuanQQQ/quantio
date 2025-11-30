@@ -57,3 +57,18 @@ export async function fetchOperations() {
     predicted_return: d.predicted_return !== undefined ? Number(d.predicted_return) : undefined,
   }))
 }
+
+export async function fetchDBStats() {
+  const res = await fetch('/api/db/stats')
+  return res.json()
+}
+
+export async function fetchDaily(symbol: string, start?: string, end?: string) {
+  const url = new URL('/api/daily', window.location.origin)
+  url.searchParams.set('symbol', symbol)
+  if (start) url.searchParams.set('start', start)
+  if (end) url.searchParams.set('end', end)
+  const res = await fetch(url.toString())
+  const data = await res.json()
+  return data as { date: string; open: number; high: number; low: number; close: number; volume: number; amount: number }[]
+}

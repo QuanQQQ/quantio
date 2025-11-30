@@ -9,6 +9,7 @@ import KlineChart from './components/KlineChart'
 import HoldingsTable from './components/HoldingsTable'
 import IndicatorsPanel from './components/IndicatorsPanel'
 import OperationsTable from './components/OperationsTable'
+import DBViewer from './components/DBViewer'
 
 const { Header, Content, Footer } = Layout
 
@@ -40,6 +41,9 @@ export default function App() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <HoldingsTable />
             <OperationsTable />
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <DBViewer />
           </div>
         </Footer>
       </Layout>
