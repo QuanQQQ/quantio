@@ -215,3 +215,25 @@ def get_stock_daily_last_n(symbol: str, end_date: str, n: int) -> pd.DataFrame:
         return df_desc
     # Return ascending order
     return df_desc.sort_values('date').reset_index(drop=True)
+
+def get_stock_daily_multi(symbols: list[str], start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+    """Batch fetch daily prices for multiple symbols.
+    Returns a single DataFrame including all available columns (including indicators),
+    ordered by symbol, date.
+    """
+    if not symbols:
+        return pd.DataFrame()
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ','.join(['?'] * len(symbols))
+    query = f'SELECT * FROM daily_prices WHERE symbol IN ({placeholders})'
+    params = list(symbols)
+    if start_date:
+        query += ' AND date >= ?'
+        params.append(start_date)
+    if end_date:
+        query += ' AND date <= ?'
+        params.append(end_date)
+    query += ' ORDER BY symbol, date'
+    df = pd.read_sql(query, conn, params=params)
+    conn.close()
+    return df

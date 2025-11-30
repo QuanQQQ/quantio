@@ -108,14 +108,17 @@ def process_stock(args):
     Args:
         args (tuple): (symbol, lookback, horizon, start_date, end_date)
     """
-    symbol, lookback, horizon, start_date, end_date = args
+    # args may include optional flag: use_db_fallback
+    symbol, lookback, horizon, start_date, end_date = args[:5]
+    use_db_fallback = False
+    if len(args) >= 6:
+        use_db_fallback = bool(args[5])
     
     try:
         # Fetch data (with precomputed indicators)
         df = get_stock_daily(symbol, start_date=start_date, end_date=end_date)
 
         if len(df) < lookback + horizon + 30:
-            print('走到这就不太对了！！！！')
             return [], []
 
         # Require precomputed indicator columns from DB
@@ -148,15 +151,18 @@ def process_stock(args):
             feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
             window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
             if len(window_df) < lookback:
-                # Fallback: fetch last N trading rows up to current date
-                try:
-                    current_date_str = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
-                    fallback_df = get_stock_daily_last_n(symbol, current_date_str, lookback)
-                    if not fallback_df.empty and len(fallback_df) == lookback:
-                        window_df = fallback_df[feature_cols].copy()
-                    else:
+                if use_db_fallback:
+                    # Fallback: fetch last N trading rows up to current date
+                    try:
+                        current_date_str = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
+                        fallback_df = get_stock_daily_last_n(symbol, current_date_str, lookback)
+                        if not fallback_df.empty and len(fallback_df) == lookback:
+                            window_df = fallback_df[feature_cols].copy()
+                        else:
+                            continue
+                    except Exception:
                         continue
-                except Exception:
+                else:
                     continue
             
             # Normalize window
@@ -181,7 +187,7 @@ def process_stock(args):
         # print(f"Error processing {symbol}: {e}")
         return [], []
 
-def generate_training_data(lookback=10, horizon=3, limit_stocks=None, start_date=None, end_date=None, use_multiprocessing=True):
+def generate_training_data(lookback=10, horizon=3, limit_stocks=None, start_date=None, end_date=None, use_multiprocessing=True, use_db_fallback=False, batch_fetch=False, batch_size=50):
     """
     Generate training data for the neural network.
     
@@ -197,12 +203,12 @@ def generate_training_data(lookback=10, horizon=3, limit_stocks=None, start_date
     X_all = []
     y_all = []
     
-    if use_multiprocessing:
+    if use_multiprocessing and not batch_fetch:
         from multiprocessing import Pool, cpu_count
         from tqdm import tqdm
         
         # Prepare arguments for each worker
-        tasks = [(symbol, lookback, horizon, start_date, end_date) for symbol in symbols]
+        tasks = [(symbol, lookback, horizon, start_date, end_date, use_db_fallback) for symbol in symbols]
         
         # Use fewer workers to reduce memory pressure
         num_workers = min(cpu_count(), 6)  # Use half of cores or max 4
@@ -219,12 +225,57 @@ def generate_training_data(lookback=10, horizon=3, limit_stocks=None, start_date
     else:
         # Single-threaded fallback
         from tqdm import tqdm
-        print(f"Generating data from {len(symbols)} stocks (single-threaded)...")
-        for symbol in tqdm(symbols, unit="stock"):
-            X_local, y_local = process_stock((symbol, lookback, horizon, start_date, end_date))
-            if X_local:
-                X_all.extend(X_local)
-                y_all.extend(y_local)
+        if not batch_fetch:
+            print(f"Generating data from {len(symbols)} stocks (single-threaded)...")
+            for symbol in tqdm(symbols, unit="stock"):
+                X_local, y_local = process_stock((symbol, lookback, horizon, start_date, end_date, use_db_fallback))
+                if X_local:
+                    X_all.extend(X_local)
+                    y_all.extend(y_local)
+        else:
+            print(f"Generating data (batch fetch) from {len(symbols)} stocks, batch_size={batch_size}...")
+            # Reduce DB I/O by fetching multiple symbols at once
+            for i in tqdm(range(0, len(symbols), batch_size), unit="batch"):
+                batch_syms = symbols[i:i+batch_size]
+                df_all = get_stock_daily_multi(batch_syms, start_date=start_date, end_date=end_date)
+                if df_all.empty:
+                    continue
+                feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
+                base_cols = ['open', 'high', 'low', 'close', 'volume']
+                for symbol in batch_syms:
+                    df = df_all[df_all['symbol'] == symbol].copy()
+                    if len(df) < lookback + horizon + 30:
+                        continue
+                    if any(col not in df.columns for col in feature_cols):
+                        continue
+                    df.dropna(subset=base_cols + feature_cols, inplace=True)
+                    if df.empty:
+                        continue
+                    df = df.reset_index(drop=True)
+                    potential_indices = df[df['j'] < 13].index
+                    for idx in potential_indices:
+                        if idx < lookback or idx >= len(df) - horizon:
+                            continue
+                        window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
+                        if len(window_df) < lookback:
+                            if use_db_fallback:
+                                try:
+                                    current_date_str = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
+                                    fallback_df = get_stock_daily_last_n(symbol, current_date_str, lookback)
+                                    if not fallback_df.empty and len(fallback_df) == lookback:
+                                        window_df = fallback_df[feature_cols].copy()
+                                    else:
+                                        continue
+                                except Exception:
+                                    continue
+                            else:
+                                continue
+                        normalized_window = normalize_data(window_df)
+                        X_all.append(normalized_window.values)
+                        current_close = df.iloc[idx]['close']
+                        future_close = df.iloc[idx+horizon]['close']
+                        score = (future_close - current_close) / current_close * 100
+                        y_all.append(score)
             
     if not X_all:
         return np.array([]), np.array([])
@@ -238,7 +289,10 @@ def process_stock_backtest(args):
     Args:
         args (tuple): (symbol, lookback, horizon, start_date, end_date)
     """
-    symbol, lookback, horizon, start_date, end_date = args
+    symbol, lookback, horizon, start_date, end_date = args[:5]
+    use_db_fallback = False
+    if len(args) >= 6:
+        use_db_fallback = bool(args[5])
     
     try:
         # Calculate fetch start date with buffer
@@ -301,14 +355,17 @@ def process_stock_backtest(args):
             feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
             window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
             if len(window_df) < lookback:
-                try:
-                    current_date_str = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
-                    fallback_df = get_stock_daily_last_n(symbol, current_date_str, lookback)
-                    if not fallback_df.empty and len(fallback_df) == lookback:
-                        window_df = fallback_df[feature_cols].copy()
-                    else:
+                if use_db_fallback:
+                    try:
+                        current_date_str = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
+                        fallback_df = get_stock_daily_last_n(symbol, current_date_str, lookback)
+                        if not fallback_df.empty and len(fallback_df) == lookback:
+                            window_df = fallback_df[feature_cols].copy()
+                        else:
+                            continue
+                    except Exception:
                         continue
-                except Exception:
+                else:
                     continue
             
             # Normalize window
@@ -335,7 +392,7 @@ def process_stock_backtest(args):
     except Exception as e:
         return [], [], []
 
-def generate_backtest_data(lookback=10, horizon=3, limit_stocks=None, start_date=None, end_date=None, use_multiprocessing=True):
+def generate_backtest_data(lookback=10, horizon=3, limit_stocks=None, start_date=None, end_date=None, use_multiprocessing=True, use_db_fallback=False, batch_fetch=False, batch_size=50):
     """
     Generate data for backtesting with metadata.
     """
@@ -349,11 +406,11 @@ def generate_backtest_data(lookback=10, horizon=3, limit_stocks=None, start_date
     y_all = []
     metadata_all = []
     
-    if use_multiprocessing:
+    if use_multiprocessing and not batch_fetch:
         from multiprocessing import Pool, cpu_count
         from tqdm import tqdm
         
-        tasks = [(symbol, lookback, horizon, start_date, end_date) for symbol in symbols]
+        tasks = [(symbol, lookback, horizon, start_date, end_date, use_db_fallback) for symbol in symbols]
         num_workers = min(cpu_count(), 8)
         print(f"Generating backtest data from {len(symbols)} stocks using {num_workers} cores...")
         
@@ -367,13 +424,72 @@ def generate_backtest_data(lookback=10, horizon=3, limit_stocks=None, start_date
                 metadata_all.extend(meta_local)
     else:
         from tqdm import tqdm
-        print(f"Generating backtest data from {len(symbols)} stocks (single-threaded)...")
-        for symbol in tqdm(symbols, unit="stock"):
-            X_local, y_local, meta_local = process_stock_backtest((symbol, lookback, horizon, start_date, end_date))
-            if X_local:
-                X_all.extend(X_local)
-                y_all.extend(y_local)
-                metadata_all.extend(meta_local)
+        if not batch_fetch:
+            print(f"Generating backtest data from {len(symbols)} stocks (single-threaded)...")
+            for symbol in tqdm(symbols, unit="stock"):
+                X_local, y_local, meta_local = process_stock_backtest((symbol, lookback, horizon, start_date, end_date, use_db_fallback))
+                if X_local:
+                    X_all.extend(X_local)
+                    y_all.extend(y_local)
+                    metadata_all.extend(meta_local)
+        else:
+            print(f"Generating backtest data (batch fetch) from {len(symbols)} stocks, batch_size={batch_size}...")
+            for i in tqdm(range(0, len(symbols), batch_size), unit="batch"):
+                batch_syms = symbols[i:i+batch_size]
+                df_all = get_stock_daily_multi(batch_syms, start_date=start_date, end_date=end_date)
+                if df_all.empty:
+                    continue
+                feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
+                base_cols = ['open', 'high', 'low', 'close', 'volume']
+                start_date_int = int(start_date) if start_date else 0
+                for symbol in batch_syms:
+                    df = df_all[df_all['symbol'] == symbol].copy()
+                    if len(df) < lookback + horizon + 30:
+                        continue
+                    if any(col not in df.columns for col in feature_cols):
+                        continue
+                    df.dropna(subset=base_cols + feature_cols, inplace=True)
+                    if df.empty:
+                        continue
+                    df = df.reset_index(drop=True)
+                    potential_indices = df[df['j'] < 13].index
+                    for idx in potential_indices:
+                        if idx < lookback or idx >= len(df) - horizon:
+                            continue
+                        current_date_str = df.iloc[idx]['date']
+                        try:
+                            current_date_int = int(str(current_date_str).replace('-', '').replace('/', ''))
+                        except Exception:
+                            continue
+                        if start_date and current_date_int < start_date_int:
+                            continue
+                        window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
+                        if len(window_df) < lookback:
+                            if use_db_fallback:
+                                try:
+                                    cur_dt = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
+                                    fallback_df = get_stock_daily_last_n(symbol, cur_dt, lookback)
+                                    if not fallback_df.empty and len(fallback_df) == lookback:
+                                        window_df = fallback_df[feature_cols].copy()
+                                    else:
+                                        continue
+                                except Exception:
+                                    continue
+                            else:
+                                continue
+                        normalized_window = normalize_data(window_df)
+                        X_all.append(normalized_window.values)
+                        current_close = df.iloc[idx]['close']
+                        future_close = df.iloc[idx+horizon]['close']
+                        score = (future_close - current_close) / current_close * 100
+                        y_all.append(score)
+                        metadata_all.append({
+                            'symbol': symbol,
+                            'date': df.iloc[idx]['date'],
+                            'close': current_close,
+                            'future_close': future_close,
+                            'actual_return': score
+                        })
             
     if not X_all:
         return np.array([]), np.array([]), []
