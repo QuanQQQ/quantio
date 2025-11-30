@@ -19,7 +19,8 @@ from src.config import DataConfig, get_preset
 from src.backtest_engine import BacktestEngine
 
 def run_backtest(config=None, start_date=None, end_date=None, strategy='dynamic',
-                initial_capital=100000, stop_loss=5.0, take_profit_buffer=5.0):
+                initial_capital=100000, stop_loss=5.0, take_profit_buffer=5.0,
+                dynamic_variant='v2'):
     """
     Run backtest with the given configuration.
     
@@ -123,13 +124,15 @@ def run_backtest(config=None, start_date=None, end_date=None, strategy='dynamic'
         print(f"Initial Capital: ${initial_capital:,.2f}")
         print(f"Stop-Loss: {stop_loss}%")
         print(f"Take-Profit Buffer: {take_profit_buffer}%")
+        print(f"Dynamic Variant: {dynamic_variant}")
         
         # Initialize backtest engine
         engine = BacktestEngine(
             initial_capital=initial_capital,
             max_positions=5,
-            stop_loss_pct=-stop_loss,  # Convert to negative
-            take_profit_buffer=take_profit_buffer
+            stop_loss_pct=-stop_loss,
+            take_profit_buffer=take_profit_buffer,
+            variant=dynamic_variant
         )
         
         # Prepare predictions dataframe
@@ -267,6 +270,8 @@ Examples:
                        help="Stop-loss percentage for dynamic strategy (default: 5.0)")
     parser.add_argument("--take-profit-buffer", type=float, default=5.0,
                        help="Take-profit buffer above predicted return for dynamic strategy (default: 5.0)")
+    parser.add_argument("--dynamic-variant", type=str, default="v2", choices=["v1", "v2"],
+                       help="Dynamic strategy version: v1 (原版) 或 v2 (趋势增强版)")
     
     args = parser.parse_args()
     
@@ -297,5 +302,6 @@ Examples:
         strategy=args.strategy,
         initial_capital=args.initial_capital,
         stop_loss=args.stop_loss,
-        take_profit_buffer=args.take_profit_buffer
+        take_profit_buffer=args.take_profit_buffer,
+        dynamic_variant=args.dynamic_variant
     )

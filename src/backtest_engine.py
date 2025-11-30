@@ -255,7 +255,8 @@ class BacktestEngine:
     """
     
     def __init__(self, initial_capital: float = 100000, max_positions: int = 5,
-                 stop_loss_pct: float = -5.0, take_profit_buffer: float = 5.0):
+                 stop_loss_pct: float = -5.0, take_profit_buffer: float = 5.0,
+                 variant: str = 'v2'):
         """
         Initialize backtest engine.
         
@@ -270,6 +271,7 @@ class BacktestEngine:
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_buffer = take_profit_buffer
         self.portfolio = PortfolioManager(initial_capital, max_positions)
+        self.variant = variant
         # Cache for delisting detection via interface
         self._delisted_cache: Dict[str, bool] = {}
 
@@ -317,7 +319,9 @@ class BacktestEngine:
             return pd.DataFrame()
     
     def check_stop_loss_take_profit(self, position: Position, current_price: float,
-                                    current_date: str) -> Optional[Tuple[str, Optional[float]]]:
+                                    current_date: str,
+                                    short_trend: Optional[float] = None,
+                                    long_trend: Optional[float] = None) -> Optional[Tuple[str, Optional[float]]]:
         """
         Check if stop-loss or take-profit conditions are met.
         
@@ -330,17 +334,33 @@ class BacktestEngine:
             Tuple of (action, partial_ratio) where action is 'stop_loss', 'take_profit', or None
         """
         unrealized_pnl = position.get_unrealized_pnl(current_price)
-        
-        # Check stop loss
-        if unrealized_pnl <= self.stop_loss_pct:
-            return ('stop_loss', None)  # Sell all
-        
-        # Check take profit (only once)
-        take_profit_threshold = position.predicted_return + self.take_profit_buffer
-        if (not position.take_profit_done) and unrealized_pnl >= take_profit_threshold:
-            return ('take_profit', 0.5)  # Sell half
-        
-        return None
+
+        if self.variant == 'v1':
+            if unrealized_pnl <= self.stop_loss_pct:
+                return ('stop_loss', None)
+            take_profit_threshold = position.predicted_return + self.take_profit_buffer
+            if (not position.take_profit_done) and unrealized_pnl >= take_profit_threshold:
+                return ('take_profit', 0.5)
+            return None
+        else:
+            below_long = False
+            if long_trend is not None:
+                try:
+                    below_long = (not np.isnan(long_trend)) and (current_price < long_trend)
+                except Exception:
+                    below_long = False
+            if unrealized_pnl <= self.stop_loss_pct or below_long:
+                return ('stop_loss', None)
+            take_profit_threshold = position.predicted_return + self.take_profit_buffer
+            below_short = False
+            if short_trend is not None:
+                try:
+                    below_short = (not np.isnan(short_trend)) and (current_price < short_trend)
+                except Exception:
+                    below_short = False
+            if (not position.take_profit_done) and (unrealized_pnl >= take_profit_threshold or below_short):
+                return ('take_profit', 0.5)
+            return None
     
     def run_backtest(self, predictions: pd.DataFrame, start_date: str, end_date: str,
                     horizon: int) -> pd.DataFrame:
@@ -414,7 +434,20 @@ class BacktestEngine:
                     continue
                 
                 # Check stop-loss and take-profit
-                action_result = self.check_stop_loss_take_profit(position, current_price, current_date_str)
+                short_trend_val = None
+                long_trend_val = None
+                try:
+                    if 'short_trend' in price_df.columns:
+                        short_trend_val = float(price_df.iloc[0]['short_trend'])
+                    if 'long_trend' in price_df.columns:
+                        long_trend_val = float(price_df.iloc[0]['long_trend'])
+                except Exception:
+                    short_trend_val = None
+                    long_trend_val = None
+
+                action_result = self.check_stop_loss_take_profit(
+                    position, current_price, current_date_str, short_trend_val, long_trend_val
+                )
                 
                 if action_result is not None:
                     action, partial_ratio = action_result
@@ -447,8 +480,10 @@ class BacktestEngine:
                 # Select top N
                 candidates = candidates.head(positions_to_open)
                 
-                # Allocation rule: fixed 1/max_positions of initial capital per position
-                per_slot_capital = self.initial_capital / self.max_positions
+                if self.variant == 'v1':
+                    per_slot_capital = self.initial_capital / self.max_positions
+                else:
+                    per_slot_capital = (self.portfolio.equity_index * self.initial_capital) / self.max_positions
                 # Determine openable slots by cash availability
                 openable_by_cash = int(self.portfolio.cash // per_slot_capital)
                 slots_to_open = min(positions_to_open, openable_by_cash)
