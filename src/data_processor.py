@@ -217,7 +217,66 @@ def generate_training_data(lookback=10, horizon=3, limit_stocks=None, start_date
         with Pool(processes=num_workers) as pool:
             # Use imap with chunksize to process in batches
             results = list(tqdm(pool.imap(process_stock, tasks, chunksize=10), total=len(tasks), unit="stock"))
-            
+        
+        for X_local, y_local in results:
+            if X_local:
+                X_all.extend(X_local)
+                y_all.extend(y_local)
+    elif use_multiprocessing and batch_fetch:
+        from multiprocessing import Pool, cpu_count
+        from tqdm import tqdm
+        def process_batch_training(args):
+            batch_syms, lookback, horizon, start_date, end_date, use_db_fallback = args
+            X_res = []
+            y_res = []
+            df_all = get_stock_daily_multi(batch_syms, start_date=start_date, end_date=end_date)
+            if df_all.empty:
+                return X_res, y_res
+            feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
+            base_cols = ['open', 'high', 'low', 'close', 'volume']
+            for symbol in batch_syms:
+                df = df_all[df_all['symbol'] == symbol].copy()
+                if len(df) < lookback + horizon + 30:
+                    continue
+                if any(col not in df.columns for col in feature_cols):
+                    continue
+                df.dropna(subset=base_cols + feature_cols, inplace=True)
+                if df.empty:
+                    continue
+                df = df.reset_index(drop=True)
+                potential_indices = df[df['j'] < 13].index
+                for idx in potential_indices:
+                    if idx < lookback or idx >= len(df) - horizon:
+                        continue
+                    window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
+                    if len(window_df) < lookback:
+                        if use_db_fallback:
+                            try:
+                                current_date_str = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
+                                fallback_df = get_stock_daily_last_n(symbol, current_date_str, lookback)
+                                if not fallback_df.empty and len(fallback_df) == lookback:
+                                    window_df = fallback_df[feature_cols].copy()
+                                else:
+                                    continue
+                            except Exception:
+                                continue
+                        else:
+                            continue
+                    normalized_window = normalize_data(window_df)
+                    X_res.append(normalized_window.values)
+                    current_close = df.iloc[idx]['close']
+                    future_close = df.iloc[idx+horizon]['close']
+                    score = (future_close - current_close) / current_close * 100
+                    y_res.append(score)
+            return X_res, y_res
+
+        tasks = []
+        for i in range(0, len(symbols), batch_size):
+            tasks.append((symbols[i:i+batch_size], lookback, horizon, start_date, end_date, use_db_fallback))
+        num_workers = min(cpu_count(), 6)
+        print(f"Generating data with multiprocessing batch fetch: {len(tasks)} batches using {num_workers} cores...")
+        with Pool(processes=num_workers) as pool:
+            results = list(tqdm(pool.imap(process_batch_training, tasks, chunksize=1), total=len(tasks), unit="batch"))
         for X_local, y_local in results:
             if X_local:
                 X_all.extend(X_local)
@@ -417,6 +476,82 @@ def generate_backtest_data(lookback=10, horizon=3, limit_stocks=None, start_date
         with Pool(processes=num_workers) as pool:
             results = list(tqdm(pool.imap(process_stock_backtest, tasks, chunksize=10), total=len(tasks), unit="stock"))
             
+        for X_local, y_local, meta_local in results:
+            if X_local:
+                X_all.extend(X_local)
+                y_all.extend(y_local)
+                metadata_all.extend(meta_local)
+    elif use_multiprocessing and batch_fetch:
+        from multiprocessing import Pool, cpu_count
+        from tqdm import tqdm
+        def process_batch_backtest(args):
+            batch_syms, lookback, horizon, start_date, end_date, use_db_fallback = args
+            X_res = []
+            y_res = []
+            meta_res = []
+            df_all = get_stock_daily_multi(batch_syms, start_date=start_date, end_date=end_date)
+            if df_all.empty:
+                return X_res, y_res, meta_res
+            feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
+            base_cols = ['open', 'high', 'low', 'close', 'volume']
+            start_date_int = int(start_date) if start_date else 0
+            for symbol in batch_syms:
+                df = df_all[df_all['symbol'] == symbol].copy()
+                if len(df) < lookback + horizon + 30:
+                    continue
+                if any(col not in df.columns for col in feature_cols):
+                    continue
+                df.dropna(subset=base_cols + feature_cols, inplace=True)
+                if df.empty:
+                    continue
+                df = df.reset_index(drop=True)
+                potential_indices = df[df['j'] < 13].index
+                for idx in potential_indices:
+                    if idx < lookback or idx >= len(df) - horizon:
+                        continue
+                    current_date_str = df.iloc[idx]['date']
+                    try:
+                        current_date_int = int(str(current_date_str).replace('-', '').replace('/', ''))
+                    except Exception:
+                        continue
+                    if start_date and current_date_int < start_date_int:
+                        continue
+                    window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
+                    if len(window_df) < lookback:
+                        if use_db_fallback:
+                            try:
+                                cur_dt = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
+                                fallback_df = get_stock_daily_last_n(symbol, cur_dt, lookback)
+                                if not fallback_df.empty and len(fallback_df) == lookback:
+                                    window_df = fallback_df[feature_cols].copy()
+                                else:
+                                    continue
+                            except Exception:
+                                continue
+                        else:
+                            continue
+                    normalized_window = normalize_data(window_df)
+                    X_res.append(normalized_window.values)
+                    current_close = df.iloc[idx]['close']
+                    future_close = df.iloc[idx+horizon]['close']
+                    score = (future_close - current_close) / current_close * 100
+                    y_res.append(score)
+                    meta_res.append({
+                        'symbol': symbol,
+                        'date': df.iloc[idx]['date'],
+                        'close': current_close,
+                        'future_close': future_close,
+                        'actual_return': score
+                    })
+            return X_res, y_res, meta_res
+
+        tasks = []
+        for i in range(0, len(symbols), batch_size):
+            tasks.append((symbols[i:i+batch_size], lookback, horizon, start_date, end_date, use_db_fallback))
+        num_workers = min(cpu_count(), 8)
+        print(f"Generating backtest data with multiprocessing batch fetch: {len(tasks)} batches using {num_workers} cores...")
+        with Pool(processes=num_workers) as pool:
+            results = list(tqdm(pool.imap(process_batch_backtest, tasks, chunksize=1), total=len(tasks), unit="batch"))
         for X_local, y_local, meta_local in results:
             if X_local:
                 X_all.extend(X_local)
