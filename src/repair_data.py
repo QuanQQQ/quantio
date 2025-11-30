@@ -77,7 +77,10 @@ def refetch_missing(symbol: str, start: str, end: str, missing_days: List[str]) 
     if not missing_days:
         return 0
     try:
-        df = pro.daily(ts_code=symbol, start_date=start, end_date=end)
+        # Narrow fetch range to the actual missing window (robust date parsing)
+        start_local = min(missing_days, key=lambda d: datetime.strptime(str(d), '%Y%m%d'))
+        end_local = max(missing_days, key=lambda d: datetime.strptime(str(d), '%Y%m%d'))
+        df = pro.daily(ts_code=symbol, start_date=start_local, end_date=end_local)
         if df is None or df.empty:
             return 0
         df = df.rename(columns={
