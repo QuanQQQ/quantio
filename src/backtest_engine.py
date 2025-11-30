@@ -44,6 +44,7 @@ class Position:
         self.last_price = entry_price  # Fallback price when daily price missing
         self.take_profit_done = False  # Only allow one partial take-profit
         self.short_below_hits = 0      # Count of days price < short_trend since entry
+        self.short_above_seen = False  # Has price ever been >= short_trend since entry
         
     def get_unrealized_pnl(self, current_price: float) -> float:
         """Calculate unrealized P&L percentage."""
@@ -354,6 +355,15 @@ class BacktestEngine:
                     below_short = (not np.isnan(short_trend)) and (current_price < short_trend)
                 except Exception:
                     below_short = False
+            # Track if price has ever been above short trend since entry
+            above_short = False
+            if short_trend is not None:
+                try:
+                    above_short = (not np.isnan(short_trend)) and (current_price >= short_trend)
+                except Exception:
+                    above_short = False
+            if above_short:
+                position.short_above_seen = True
             if below_short:
                 position.short_below_hits += 1
                 # Second time breach -> full close immediately
@@ -370,8 +380,11 @@ class BacktestEngine:
             if unrealized_pnl <= self.stop_loss_pct or below_long:
                 return ('stop_loss', None)
 
-            # Short-trend first breach partial take-profit (only when floating profit)
-            if below_short and position.short_below_hits == 1 and (not position.take_profit_done) and (unrealized_pnl > 0):
+            # Short-trend first breach partial take-profit (only when floating profit AND has stood above short trend before)
+            if (
+                below_short and position.short_below_hits == 1 and
+                (not position.take_profit_done) and (unrealized_pnl > 0) and position.short_above_seen
+            ):
                 return ('take_profit', 0.5)
 
             # Predicted-based take profit (only once, only when floating profit)
