@@ -136,12 +136,20 @@ def purge_non_trading_rows(start: Optional[str], end: Optional[str], use_calenda
         to_delete = [d for d in present_dates if d not in tdates]
         deleted = 0
         if to_delete:
+            # Chunked IN deletes to reduce commits and improve throughput
+            CHUNK = 500
             from tqdm import tqdm
-            pb = tqdm(to_delete, desc='Purge non-trading dates', unit='day')
-            for d in pb:
-                cur.execute('DELETE FROM daily_prices WHERE date = ?', (d,))
+            pb = tqdm(range(0, len(to_delete), CHUNK), desc='Purge non-trading dates', unit='batch')
+            for i in pb:
+                chunk = to_delete[i:i+CHUNK]
+                if not chunk:
+                    continue
+                placeholders = ','.join(['?'] * len(chunk))
+                before = conn.total_changes
+                cur.execute(f'DELETE FROM daily_prices WHERE date IN ({placeholders})', chunk)
                 conn.commit()
-                deleted += cur.rowcount if hasattr(cur, 'rowcount') else 0
+                # Compute delta changes for reliable count
+                deleted += (conn.total_changes - before)
             pb.close()
         return deleted
     finally:
