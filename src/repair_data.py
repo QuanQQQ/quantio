@@ -17,6 +17,7 @@ import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import List, Optional
+from tqdm import tqdm
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
@@ -134,25 +135,32 @@ def detect_and_repair(symbols: List[str], start: Optional[str], end: Optional[st
         tdates = [fmt(d) for d in pd.date_range(start=start_dt, end=end_dt, freq='D')]
 
     total_inserted = 0
-    for sym in symbols:
+    pb = tqdm(symbols, desc='Repair symbols', unit='sym')
+    for sym in pb:
         present_df = get_symbol_dates(sym, start, end)
         present_dates = set(present_df['date'].tolist()) if not present_df.empty else set()
         missing = [d for d in tdates if d not in present_dates]
         if not missing:
-            print(f'{sym}: OK (no missing)')
+            pb.write(f'{sym}: OK (no missing)')
             continue
-        print(f'{sym}: missing {len(missing)} days')
+        pb.write(f'{sym}: missing {len(missing)} days')
         inserted = 0
         if method in ('refetch', 'mixed'):
-            inserted += refetch_missing(sym, start or tdates[0], end or tdates[-1], missing)
+            # show progress for refetch step
+            inserted_refetch = refetch_missing(sym, start or tdates[0], end or tdates[-1], missing)
+            inserted += inserted_refetch
+            pb.write(f'  refetch inserted {inserted_refetch}')
             # recompute missing after refetch
             present_df = get_symbol_dates(sym, start, end)
             present_dates = set(present_df['date'].tolist()) if not present_df.empty else set()
             missing = [d for d in tdates if d not in present_dates]
         if missing and method in ('ffill', 'mixed'):
-            inserted += insert_ffill_rows(sym, missing)
-        print(f'  inserted {inserted} rows')
+            inserted_ffill = insert_ffill_rows(sym, missing)
+            inserted += inserted_ffill
+            pb.write(f'  ffill inserted {inserted_ffill}')
+        pb.write(f'  inserted total {inserted} rows for {sym}')
         total_inserted += inserted
+    pb.close()
     print(f'Total inserted: {total_inserted}')
 
 def main():
@@ -172,6 +180,7 @@ def main():
     if args.symbols:
         syms = [s.strip() for s in args.symbols.split(',') if s.strip()]
     else:
+        # 默认过滤创业板/科创板/北交所等需权限标的
         df = get_all_stocks(filter_tradable=not args.no_filter)
         syms = df['symbol'].tolist()
     if args.limit:
@@ -181,4 +190,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
