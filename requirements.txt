@@ -1,0 +1,5 @@
+tushare
+pandas
+streamlit
+plotly
+openpyxl
