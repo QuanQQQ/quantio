@@ -199,3 +199,19 @@ def get_stock_daily(symbol, start_date=None, end_date=None):
     df = pd.read_sql(query, conn, params=params)
     conn.close()
     return df
+
+def get_stock_daily_last_n(symbol: str, end_date: str, n: int) -> pd.DataFrame:
+    """Get last N trading rows up to (and including) end_date for a stock.
+    Returns rows sorted by date ascending.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    query = (
+        'SELECT * FROM daily_prices WHERE symbol = ? AND date <= ? '
+        'ORDER BY date DESC LIMIT ?'
+    )
+    df_desc = pd.read_sql(query, conn, params=[symbol, end_date, int(n)])
+    conn.close()
+    if df_desc.empty:
+        return df_desc
+    # Return ascending order
+    return df_desc.sort_values('date').reset_index(drop=True)

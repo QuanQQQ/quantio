@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from database import get_all_stocks, get_stock_daily
+from database import get_all_stocks, get_stock_daily, get_stock_daily_last_n
 from datetime import datetime, timedelta
 
 def calculate_kdj(df, period=9):
@@ -115,6 +115,7 @@ def process_stock(args):
         df = get_stock_daily(symbol, start_date=start_date, end_date=end_date)
 
         if len(df) < lookback + horizon + 30:
+            print('走到这就不太对了！！！！')
             return [], []
 
         # Require precomputed indicator columns from DB
@@ -146,6 +147,17 @@ def process_stock(args):
             # Extract Features (from DB precomputed indicators)
             feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
             window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
+            if len(window_df) < lookback:
+                # Fallback: fetch last N trading rows up to current date
+                try:
+                    current_date_str = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
+                    fallback_df = get_stock_daily_last_n(symbol, current_date_str, lookback)
+                    if not fallback_df.empty and len(fallback_df) == lookback:
+                        window_df = fallback_df[feature_cols].copy()
+                    else:
+                        continue
+                except Exception:
+                    continue
             
             # Normalize window
             normalized_window = normalize_data(window_df)
@@ -288,6 +300,16 @@ def process_stock_backtest(args):
             # Extract Features (from DB precomputed indicators)
             feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
             window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
+            if len(window_df) < lookback:
+                try:
+                    current_date_str = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
+                    fallback_df = get_stock_daily_last_n(symbol, current_date_str, lookback)
+                    if not fallback_df.empty and len(fallback_df) == lookback:
+                        window_df = fallback_df[feature_cols].copy()
+                    else:
+                        continue
+                except Exception:
+                    continue
             
             # Normalize window
             normalized_window = normalize_data(window_df)
