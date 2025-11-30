@@ -219,35 +219,49 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
         print(f"Fetching batch of {len(batch_dates)} days starting {batch_dates[0]}...")
         
         batch_df_list = []
-        
-        for date in batch_dates:
+        # Split batch_dates into contiguous sub-ranges with max natural span <= 30 days
+        def _dt(s: str):
+            return datetime.strptime(s, '%Y%m%d')
+        sub_ranges = []
+        j = 0
+        while j < len(batch_dates):
+            start = batch_dates[j]
+            k = j
+            while k + 1 < len(batch_dates) and (_dt(batch_dates[k + 1]) - _dt(start)).days <= 2:
+                k += 1
+            sub_ranges.append(batch_dates[j:k + 1])
+            j = k + 1
+
+        for sub in sub_ranges:
             try:
-                # Fetch all stocks for this date
+                range_start = sub[0]
+                range_end = sub[-1]
                 # rate limit
                 time.sleep(0.2)
-                
-                df = pro.daily(trade_date=date)
-                
+                df = pro.daily(start_date=range_start, end_date=range_end)
                 if not df.empty:
-                    # Rename columns
                     df = df.rename(columns={
                         'ts_code': 'symbol',
                         'trade_date': 'date',
                         'vol': 'volume'
                     })
                     df = df[['symbol', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount']]
+                    dates_set = set(sub)
+                    df = df[df['date'].isin(dates_set)]
+                    present_dates = set(df['date'].unique().tolist())
+                    missing_in_sub = [d for d in sub if d not in present_dates]
+                    print(f"  Fetched sub-range {range_start}~{range_end}: {len(df)} records, days covered={len(present_dates)}")
+                    if missing_in_sub:
+                        print(f"  WARNING: No data returned for days: {', '.join(missing_in_sub[:10])}{' ...' if len(missing_in_sub)>10 else ''}")
                     batch_df_list.append(df)
-                    print(f"  Fetched {date}: {len(df)} records.")
                     total_records_saved += len(df)
                 else:
-                    if using_trade_calendar:
-                        print(f"WARNING: No data returned for trading day {date}.")
-                    # Else, likely a non-trading day
+                    print(f"  WARNING: Empty result for sub-range {range_start}~{range_end}")
             except Exception as e:
-                print(f"  Error fetching {date}: {e}")
+                print(f"  Error fetching sub-range {sub[0]}~{sub[-1]}: {e}")
                 time.sleep(1)
-            processed_days += 1
-            pb.update(1)
+            processed_days += len(sub)
+            pb.update(len(sub))
 
         # Save batch
         if batch_df_list:
