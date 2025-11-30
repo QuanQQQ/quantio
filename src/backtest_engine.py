@@ -325,6 +325,15 @@ class BacktestEngine:
         
         # Get unique dates
         trading_dates = sorted(predictions['date'].unique())
+        # Debug: earliest date in generated backtest predictions
+        if len(trading_dates) > 0:
+            earliest_dt = trading_dates[0]
+            try:
+                print(f"[DEBUG] Earliest generated trading date: {earliest_dt.strftime('%Y-%m-%d')} (raw: {earliest_dt.strftime('%Y%m%d')})")
+            except Exception:
+                print(f"[DEBUG] Earliest generated trading date: {earliest_dt}")
+        else:
+            print("[DEBUG] No trading dates found in predictions.")
         print(f"\nRunning dynamic backtest from {start_date} to {end_date}...")
         print(f"Strategy: Top {self.max_positions} stocks, Stop-Loss: {self.stop_loss_pct}%, Take-Profit: Pred+{self.take_profit_buffer}%")
         print(f"Initial Capital: ${self.initial_capital:,.2f}\n")
