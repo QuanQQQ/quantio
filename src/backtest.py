@@ -257,7 +257,7 @@ Examples:
     parser.add_argument("--end-date", type=str, help="Backtest end date (YYYYMMDD)")
     
     # Strategy selection
-    parser.add_argument("--strategy", type=str, default="simple", choices=["simple", "dynamic"],
+    parser.add_argument("--strategy", type=str, default="dynamic", choices=["simple", "dynamic"],
                        help="Backtest strategy: 'simple' (buy and hold) or 'dynamic' (with stop-loss/take-profit)")
     
     # Dynamic strategy parameters
