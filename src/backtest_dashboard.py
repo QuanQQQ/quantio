@@ -237,12 +237,18 @@ def main():
                 '价格': price,
                 '数量': qty,
                 '金额(¥)': value_amt,
-                '卖出盈亏(¥)': pnl_amt if pnl_amt is not None else '',
+                '卖出盈亏(¥)': pnl_amt,  # 保持为数值或 None，避免混合类型
                 '原因': reason,
                 '比例': (f"{int(pr*100)}%" if (pr is not None and pr<1) else ("100%" if action=='sell' else '')),
-                '持仓天数': hold_days if action=='sell' else '',
+                '持仓天数': hold_days if action=='sell' else None,
             })
         out_df = pd.DataFrame(rows)
+        # 统一列类型，避免 PyArrow 转换报错
+        for col in ['价格','数量','金额(¥)','卖出盈亏(¥)']:
+            if col in out_df.columns:
+                out_df[col] = pd.to_numeric(out_df[col], errors='coerce')
+        if '持仓天数' in out_df.columns:
+            out_df['持仓天数'] = pd.to_numeric(out_df['持仓天数'], errors='coerce').astype('Int64')
         st.dataframe(out_df)
 
 if __name__ == "__main__":

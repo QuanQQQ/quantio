@@ -40,6 +40,7 @@ class Position:
         self.horizon = horizon
         self.hold_days = 0
         self.trades = []  # List of trade records
+        self.last_price = entry_price  # Fallback price when daily price missing
         self.take_profit_done = False  # Only allow one partial take-profit
         
     def get_unrealized_pnl(self, current_price: float) -> float:
@@ -155,8 +156,8 @@ class PortfolioManager:
         """
         position_value = 0
         for pos in self.get_active_positions():
-            if pos.symbol in current_prices:
-                position_value += pos.get_position_value(current_prices[pos.symbol])
+            price = current_prices.get(pos.symbol, pos.last_price)
+            position_value += pos.get_position_value(price)
         
         return self.cash + position_value
     
@@ -349,11 +350,12 @@ class BacktestEngine:
             for position in list(self.portfolio.get_active_positions()):
                 # Get current price
                 price_df = self.get_daily_prices(position.symbol, current_date_str, current_date_str)
-                
                 if price_df.empty:
-                    continue
-                
-                current_price = price_df.iloc[0]['close']
+                    # Fallback to last known price to avoid artificial equity drops
+                    current_price = position.last_price
+                else:
+                    current_price = price_df.iloc[0]['close']
+                    position.last_price = current_price
                 
                 # Check for horizon expiry (force close)
                 if position.hold_days >= horizon:
@@ -426,13 +428,10 @@ class BacktestEngine:
             # Record daily equity
             current_prices = {row['symbol']: row['close'] 
                             for _, row in daily_predictions.iterrows()}
-            
-            # Add prices for active positions not in today's predictions
+            # Ensure all positions have a price (fallback to last known)
             for pos in self.portfolio.get_active_positions():
                 if pos.symbol not in current_prices:
-                    price_df = self.get_daily_prices(pos.symbol, current_date_str, current_date_str)
-                    if not price_df.empty:
-                        current_prices[pos.symbol] = price_df.iloc[0]['close']
+                    current_prices[pos.symbol] = pos.last_price
             
             equity = self.portfolio.get_total_equity(current_prices)
             self.portfolio.daily_equity.append({
