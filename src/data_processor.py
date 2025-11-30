@@ -332,6 +332,24 @@ def generate_backtest_data(lookback=10, horizon=3, limit_stocks=None, start_date
     if not X_all:
         return np.array([]), np.array([]), []
         
+    # Print daily matches summary (dates and symbols with J<13)
+    try:
+        meta_df = pd.DataFrame(metadata_all)
+        if not meta_df.empty and 'date' in meta_df.columns and 'symbol' in meta_df.columns:
+            # Ensure date as str and sorted
+            meta_df['date'] = meta_df['date'].astype(str)
+            daily_groups = meta_df.groupby('date')['symbol'].apply(list)
+            print("\n[DAILY MATCHES] J<13 triggers per day:")
+            for d in sorted(daily_groups.index):
+                syms = daily_groups.loc[d]
+                preview = ", ".join(syms[:10]) + (" ..." if len(syms) > 10 else "")
+                print(f"  {d}: {len(syms)} symbols: {preview}")
+        else:
+            print("[DAILY MATCHES] No matches found in generated metadata.")
+    except Exception as _:
+        # Non-blocking logging
+        pass
+
     return np.array(X_all), np.array(y_all), metadata_all
 
 if __name__ == "__main__":
