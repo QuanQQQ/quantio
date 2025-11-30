@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import time
 from database import init_db, save_stocks, save_daily_data, get_last_date, get_all_stocks
 from tqdm import tqdm
+from .indicators import compute_and_update_indicators, ensure_indicator_columns
 
 # Initialize Tushare
 TOKEN = '72e098f1a916bb0ecc08ba3165108f3116bf00c3b493a405d00f6940'
@@ -267,6 +268,23 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
             full_batch_df = pd.concat(batch_df_list, ignore_index=True)
             inserted = save_daily_data(full_batch_df)
             print(f"  Saved {len(full_batch_df)} records for batch. Inserted={inserted}")
+            # Compute indicators for symbols present in this batch (recent window)
+            try:
+                ensure_indicator_columns()
+                sym_set = set(full_batch_df['symbol'].unique().tolist())
+                # Limit compute window to sub-range +/- 150 days
+                range_start = min(full_batch_df['date'])
+                range_end = max(full_batch_df['date'])
+                # Expand window by 150 days on both ends
+                def _dt(s: str):
+                    return datetime.strptime(s, '%Y%m%d')
+                exp_start = (_dt(range_start) - timedelta(days=150)).strftime('%Y%m%d')
+                exp_end = (_dt(range_end) + timedelta(days=5)).strftime('%Y%m%d')
+                for sym in tqdm(sym_set, desc="Indicators", unit="sym"):
+                    changed = compute_and_update_indicators(sym, start_date=exp_start, end_date=exp_end)
+                print(f"  Indicators updated for {len(sym_set)} symbols.")
+            except Exception as e:
+                print(f"  WARNING: Failed to compute indicators for batch: {e}")
         else:
             print("  No records in this batch (likely non-trading days).")
     pb.close()
