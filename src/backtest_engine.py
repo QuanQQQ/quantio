@@ -337,15 +337,17 @@ class BacktestEngine:
         unrealized_pnl = position.get_unrealized_pnl(current_price)
 
         if self.variant == 'v1':
+            # Stop-loss first
             if unrealized_pnl <= self.stop_loss_pct:
                 return ('stop_loss', None)
+            # Take-profit only when there is floating profit
             take_profit_threshold = position.predicted_return + self.take_profit_buffer
-            if (not position.take_profit_done) and unrealized_pnl >= take_profit_threshold:
+            if (not position.take_profit_done) and (unrealized_pnl > 0) and unrealized_pnl >= take_profit_threshold:
                 return ('take_profit', 0.5)
             return None
         else:
             # v2 enhanced rules
-            # 1) Short-trend logic first: second time below short_trend -> full close
+            # Detect short-trend breach for counting
             below_short = False
             if short_trend is not None:
                 try:
@@ -354,14 +356,11 @@ class BacktestEngine:
                     below_short = False
             if below_short:
                 position.short_below_hits += 1
-                # Second time breach -> full close
+                # Second time breach -> full close immediately
                 if position.short_below_hits >= 2:
                     return ('short_trend_break_2x', None)
-                # First time and not yet taken profit -> partial close
-                if not position.take_profit_done:
-                    return ('take_profit', 0.5)
 
-            # 2) Long-trend stop loss or percentage stop loss
+            # Stop-loss first (priority over take-profit)
             below_long = False
             if long_trend is not None:
                 try:
@@ -371,9 +370,13 @@ class BacktestEngine:
             if unrealized_pnl <= self.stop_loss_pct or below_long:
                 return ('stop_loss', None)
 
-            # 3) Predicted-based take profit (only once)
+            # Short-trend first breach partial take-profit (only when floating profit)
+            if below_short and position.short_below_hits == 1 and (not position.take_profit_done) and (unrealized_pnl > 0):
+                return ('take_profit', 0.5)
+
+            # Predicted-based take profit (only once, only when floating profit)
             take_profit_threshold = position.predicted_return + self.take_profit_buffer
-            if (not position.take_profit_done) and unrealized_pnl >= take_profit_threshold:
+            if (not position.take_profit_done) and (unrealized_pnl > 0) and unrealized_pnl >= take_profit_threshold:
                 return ('take_profit', 0.5)
 
             return None
