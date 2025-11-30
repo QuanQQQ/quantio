@@ -82,7 +82,9 @@ def refetch_missing(symbol: str, start: str, end: str, missing_days: List[str]) 
         end_local = max(missing_days, key=lambda d: datetime.strptime(str(d), '%Y%m%d'))
         df = pro.daily(ts_code=symbol, start_date=start_local, end_date=end_local)
         if df is None or df.empty:
-            return 0
+            # Try to detect suspension and fill from previous close for all missing days
+            suspended_dates = detect_suspended_dates(symbol, start_local, end_local, missing_days)
+            return insert_ffill_rows(symbol, suspended_dates)
         df = df.rename(columns={
             'ts_code': 'symbol',
             'trade_date': 'date',
@@ -92,11 +94,64 @@ def refetch_missing(symbol: str, start: str, end: str, missing_days: List[str]) 
         # keep only missing dates
         s_missing = set(missing_days)
         df = df[df['date'].isin(s_missing)]
-        if df.empty:
-            return 0
-        return save_daily_data(df) or 0
+        inserted = 0
+        if not df.empty:
+            inserted += (save_daily_data(df) or 0)
+        # If still have missing days, check suspension and fill
+        fetched_dates = set(df['date'].tolist()) if not df.empty else set()
+        remaining = [d for d in missing_days if d not in fetched_dates]
+        if remaining:
+            suspended_dates = detect_suspended_dates(symbol, start_local, end_local, remaining)
+            if suspended_dates:
+                inserted += insert_ffill_rows(symbol, suspended_dates)
+        return inserted
     except Exception:
         return 0
+
+def detect_suspended_dates(symbol: str, start: str, end: str, candidate_dates: List[str]) -> List[str]:
+    """Return subset of candidate_dates that are within suspension ranges from Tushare."""
+    try:
+        susp = pro.suspend(ts_code=symbol, start_date=start, end_date=end)
+        if susp is None or susp.empty:
+            return []
+        # Build list of ranges
+        ranges = []
+        for _, row in susp.iterrows():
+            s = str(row.get('suspend_date') or start)
+            r = str(row.get('resume_date') or end)
+            ranges.append((s, r))
+        # Check each candidate if it falls into any range
+        out = []
+        for d in candidate_dates:
+            for s, r in ranges:
+                if s <= d <= r:
+                    out.append(d)
+                    break
+        return sorted(set(out))
+    except Exception:
+        return []
+
+def insert_ffill_rows(symbol: str, dates: List[str]) -> int:
+    """Insert rows using previous close for given trading dates (suspension handling only)."""
+    rows = []
+    for d in sorted(set(dates)):
+        prev = get_prev_close(symbol, d)
+        if prev is None:
+            continue
+        rows.append({
+            'symbol': symbol,
+            'date': d,
+            'open': prev,
+            'high': prev,
+            'low': prev,
+            'close': prev,
+            'volume': 0.0,
+            'amount': 0.0,
+        })
+    if not rows:
+        return 0
+    df = pd.DataFrame(rows)
+    return save_daily_data(df) or 0
 
 def purge_non_trading_rows(start: Optional[str], end: Optional[str], use_calendar: bool = True) -> int:
     """Delete rows in daily_prices where date is not a valid trading day in [start, end]."""
