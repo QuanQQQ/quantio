@@ -147,6 +147,21 @@ def purge_non_trading_rows(start: Optional[str], end: Optional[str], use_calenda
     finally:
         conn.close()
 
+def task(sym: str):
+    try:
+        present_df = get_symbol_dates(sym, start, end)
+        present_dates = set(present_df['date'].tolist()) if not present_df.empty else set()
+        missing = [d for d in tdates if d not in present_dates]
+        if not missing:
+            return sym, None
+        df_new = refetch_missing(sym, start or tdates[0], end or tdates[-1], missing)
+        if df_new is not None and not df_new.empty:
+            return sym, df_new
+        return sym, None
+    except Exception:
+        return sym, None
+
+
 def detect_and_repair(symbols: List[str], start: Optional[str], end: Optional[str], method: str = 'refetch', use_calendar: bool = True, workers: int = 4, write_chunk_rows: int = 300000):
     # Prepare trading dates
     if use_calendar:
@@ -189,20 +204,7 @@ def detect_and_repair(symbols: List[str], start: Optional[str], end: Optional[st
     import multiprocessing as mp
     workers = max(1, min(workers, mp.cpu_count()))
 
-    def task(sym: str):
-        try:
-            present_df = get_symbol_dates(sym, start, end)
-            present_dates = set(present_df['date'].tolist()) if not present_df.empty else set()
-            missing = [d for d in tdates if d not in present_dates]
-            if not missing:
-                return sym, None
-            df_new = refetch_missing(sym, start or tdates[0], end or tdates[-1], missing)
-            if df_new is not None and not df_new.empty:
-                return sym, df_new
-            return sym, None
-        except Exception:
-            return sym, None
-
+   
     try:
         with mp.Pool(processes=workers) as pool:
             for sym, df_new in tqdm(pool.imap_unordered(task, symbols, chunksize=16), total=len(symbols), unit='sym', desc='Repair symbols'):
