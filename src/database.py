@@ -152,9 +152,18 @@ def get_all_stocks(filter_tradable=True):
                 return False
             symbol = str(symbol)
             # Extract numeric part (remove exchange suffix like .SZ, .SH)
-            code = symbol.split('.')[0]
+            parts = symbol.split('.')
+            code = parts[0]
+            suffix = parts[1].upper() if len(parts) > 1 else ''
             # Filter out: 300xxx, 688xxx, 8xxxxx, 4xxxxx
-            if code.startswith('300') or code.startswith('688'):
+            # ChiNext: 300xxx 和 301xxx
+            if code.startswith('300') or code.startswith('301'):
+                return False
+            # STAR Market: 688xxx
+            if code.startswith('688'):
+                return False
+            # Beijing Stock Exchange: 后缀 .BJ 更稳妥
+            if suffix == 'BJ':
                 return False
             if code.startswith('8') or code.startswith('4'):
                 # Beijing Stock Exchange codes are typically 6 digits starting with 8 or 4
