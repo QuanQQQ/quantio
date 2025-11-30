@@ -229,8 +229,18 @@ def process_stock_backtest(args):
     symbol, lookback, horizon, start_date, end_date = args
     
     try:
+        # Calculate fetch start date with buffer
+        # Buffer: lookback * 2 + 20 days to be safe (for weekends and holidays)
+        if start_date:
+            start_dt = datetime.strptime(str(start_date), "%Y%m%d")
+            buffer_days = lookback * 2 + 20
+            fetch_start_dt = start_dt - timedelta(days=buffer_days)
+            fetch_start_date = fetch_start_dt.strftime("%Y%m%d")
+        else:
+            fetch_start_date = None
+            
         # Fetch data (with precomputed indicators)
-        df = get_stock_daily(symbol, start_date=start_date, end_date=end_date)
+        df = get_stock_daily(symbol, start_date=fetch_start_date, end_date=end_date)
 
         if len(df) < lookback + horizon + 30:
             return [], [], []
@@ -257,8 +267,22 @@ def process_stock_backtest(args):
         y_local = []
         metadata_local = []
         
+        # Parse start_date for filtering
+        start_date_int = int(start_date) if start_date else 0
+        
         for idx in potential_indices:
             if idx < lookback or idx >= len(df) - horizon:
+                continue
+            
+            # Check if the date is within the requested backtest period
+            current_date_str = df.iloc[idx]['date']
+            # Ensure date format compatibility (assuming YYYYMMDD in DB)
+            try:
+                current_date_int = int(current_date_str.replace('-', '').replace('/', ''))
+            except:
+                continue
+                
+            if start_date and current_date_int < start_date_int:
                 continue
                 
             # Extract Features (from DB precomputed indicators)

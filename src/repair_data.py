@@ -38,6 +38,9 @@ def fmt(dt: datetime) -> str:
     return dt.strftime('%Y%m%d')
 
 def resolve_date_range(start: Optional[str], end: Optional[str], years: Optional[int]):
+    if start and not end:
+        end = datetime.now()
+        return start, fmt(end)
     if start and end:
         return start, end
     if years and years > 0:
@@ -73,16 +76,17 @@ def get_prev_close(symbol: str, date: str) -> Optional[float]:
     finally:
         conn.close()
 
-def refetch_missing(symbol: str, start: str, end: str, missing_days: List[str]) -> int:
+def refetch_missing(symbol: str, start: str, end: str, missing_days: List[str]) -> Optional[pd.DataFrame]:
     if not missing_days:
-        return 0
+        return None
     try:
         # Narrow fetch range to the actual missing window (robust date parsing)
         start_local = min(missing_days, key=lambda d: datetime.strptime(str(d), '%Y%m%d'))
         end_local = max(missing_days, key=lambda d: datetime.strptime(str(d), '%Y%m%d'))
+        # print('start:', start_local, 'end:', end_local) # Reduce noise
         df = pro.daily(ts_code=symbol, start_date=start_local, end_date=end_local)
         if df is None or df.empty:
-            return 0
+            return None
         df = df.rename(columns={
             'ts_code': 'symbol',
             'trade_date': 'date',
@@ -93,10 +97,10 @@ def refetch_missing(symbol: str, start: str, end: str, missing_days: List[str]) 
         s_missing = set(missing_days)
         df = df[df['date'].isin(s_missing)]
         if df.empty:
-            return 0
-        return save_daily_data(df) or 0
+            return None
+        return df
     except Exception:
-        return 0
+        return None
 
 def purge_non_trading_rows(start: Optional[str], end: Optional[str], use_calendar: bool = True) -> int:
     """Delete rows in daily_prices where date is not a valid trading day in [start, end]."""
@@ -168,26 +172,41 @@ def detect_and_repair(symbols: List[str], start: Optional[str], end: Optional[st
         tdates = [fmt(d) for d in pd.date_range(start=start_dt, end=end_dt, freq='D')]
 
     total_inserted = 0
+    buffer_dfs = []
+    BATCH_SIZE = 50  # Number of symbols to buffer before writing
+    
     pb = tqdm(symbols, desc='Repair symbols', unit='sym')
     for sym in pb:
         present_df = get_symbol_dates(sym, start, end)
         present_dates = set(present_df['date'].tolist()) if not present_df.empty else set()
         missing = [d for d in tdates if d not in present_dates]
         if not missing:
-            pb.write(f'{sym}: OK (no missing)')
+            # pb.write(f'{sym}: OK (no missing)')
             continue
-        pb.write(f'{sym}: missing {len(missing)} days')
-        inserted = 0
+        
+        # pb.write(f'{sym}: missing {len(missing)} days')
+        
         if method == 'refetch':
-            inserted_refetch = refetch_missing(sym, start or tdates[0], end or tdates[-1], missing)
-            inserted += inserted_refetch
-            pb.write(f'  refetch inserted {inserted_refetch}')
-            # recompute missing after refetch
-            present_df = get_symbol_dates(sym, start, end)
-            present_dates = set(present_df['date'].tolist()) if not present_df.empty else set()
-            missing = [d for d in tdates if d not in present_dates]
-        pb.write(f'  inserted total {inserted} rows for {sym}')
-        total_inserted += inserted
+            df_new = refetch_missing(sym, start or tdates[0], end or tdates[-1], missing)
+            if df_new is not None and not df_new.empty:
+                buffer_dfs.append(df_new)
+                # pb.write(f'  queued {len(df_new)} rows for {sym}')
+        
+        # Check buffer size
+        if len(buffer_dfs) >= BATCH_SIZE:
+            combined_df = pd.concat(buffer_dfs, ignore_index=True)
+            inserted_count = save_daily_data(combined_df) or 0
+            total_inserted += inserted_count
+            pb.write(f'  [Batch Write] Saved {inserted_count} rows from {len(buffer_dfs)} symbols')
+            buffer_dfs = []
+            
+    # Flush remaining buffer
+    if buffer_dfs:
+        combined_df = pd.concat(buffer_dfs, ignore_index=True)
+        inserted_count = save_daily_data(combined_df) or 0
+        total_inserted += inserted_count
+        pb.write(f'  [Final Write] Saved {inserted_count} rows from {len(buffer_dfs)} symbols')
+        
     pb.close()
     print(f'Total inserted: {total_inserted}')
 

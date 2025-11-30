@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import time
 from database import init_db, save_stocks, save_daily_data, get_last_date, get_all_stocks
 from tqdm import tqdm
-from .indicators import compute_and_update_indicators, ensure_indicator_columns
+from indicators import compute_and_update_indicators, ensure_indicator_columns
 
 # Initialize Tushare
 TOKEN = '72e098f1a916bb0ecc08ba3165108f3116bf00c3b493a405d00f6940'
@@ -309,16 +309,6 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
     if progress_callback:
         progress_callback(1.0, "Update complete!")
 
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Fetch and update A-share stock data.")
-    parser.add_argument("--years", "-y", type=int, default=2, help="Number of years of historical data to fetch (default: 2)")
-    parser.add_argument("--limit", "-l", type=int, default=None, help="Limit number of stocks to update (for testing)")
-    
-    args = parser.parse_args()
-    
-    update_all(lookback_years=args.years, limit=args.limit)
-
 def update_by_symbols(start_date: str = None, end_date: str = None, years: int = 2,
                       limit: int = None, workers: int = 4, write_chunk_rows: int = 300000,
                       filter_tradable: bool = True):
@@ -394,7 +384,7 @@ def update_by_symbols(start_date: str = None, end_date: str = None, years: int =
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Fetch and update A-share stock data.")
+    parser = argparse.ArgumentParser(description="Fetch and update A-share stock data.a")
     parser.add_argument("--years", "-y", type=int, default=2, help="Number of years of historical data to fetch (default: 2)")
     parser.add_argument("--limit", "-l", type=int, default=None, help="Limit number of stocks to update (for testing)")
     parser.add_argument("--mode", type=str, default="by_dates", choices=["by_dates","by_symbols"], help="Fetch mode: by_dates (existing) or by_symbols (parallel per-symbol)")

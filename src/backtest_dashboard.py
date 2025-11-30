@@ -48,15 +48,40 @@ def calc_max_drawdown(equity_series):
                 mdd = dd
     return mdd
 
-def calc_annual_return(equity_series):
-    if len(equity_series) == 0:
+def calc_win_rate(trades_df):
+    if trades_df.empty:
         return 0.0
-    start = equity_series.iloc[0]
-    end = equity_series.iloc[-1]
-    days = len(equity_series)
-    if start <= 0 or days <= 0:
+    # actual_return is in percentage, e.g. 5.0
+    wins = trades_df[trades_df['actual_return'] > 0]
+    return len(wins) / len(trades_df)
+
+def calc_sharpe_ratio(equity_series, risk_free_rate=0.02):
+    """
+    Calculate annualized Sharpe Ratio.
+    Assumes daily data.
+    risk_free_rate: Annual risk free rate (default 2%)
+    """
+    if len(equity_series) < 2:
         return 0.0
-    return (end / start) ** (365 / days) - 1
+    
+    # Calculate daily returns
+    daily_returns = equity_series.pct_change().dropna()
+    if len(daily_returns) == 0:
+        return 0.0
+        
+    avg_daily_ret = daily_returns.mean()
+    std_daily_ret = daily_returns.std()
+    
+    if std_daily_ret == 0:
+        return 0.0
+        
+    # Convert annual risk free rate to daily
+    daily_rf = risk_free_rate / 252
+    
+    sharpe = (avg_daily_ret - daily_rf) / std_daily_ret
+    
+    # Annualize
+    return sharpe * (252 ** 0.5)
 
 def scale_equity(equity_series, principal):
     if len(equity_series) == 0:
@@ -121,18 +146,28 @@ def main():
             if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
                 start_dt, end_dt = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
                 eq = equity_df[(equity_df['date_dt'] >= start_dt) & (equity_df['date_dt'] <= end_dt)].copy()
+                
+                # Filter trades for stats
+                if not trades_df.empty:
+                    trades_df['exit_dt'] = pd.to_datetime(trades_df['exit_date'], format="%Y%m%d", errors='coerce')
+                    tr = trades_df[(trades_df['exit_dt'] >= start_dt) & (trades_df['exit_dt'] <= end_dt)].copy()
+                else:
+                    tr = pd.DataFrame()
             else:
                 eq = equity_df.copy()
+                tr = trades_df.copy()
 
             eq_scaled = scale_equity(eq['equity'], principal)
             mdd = calc_max_drawdown(eq_scaled)
-            annual = calc_annual_return(eq_scaled)
+            win_rate = calc_win_rate(tr)
+            sharpe = calc_sharpe_ratio(eq_scaled)
             total_ret = (eq_scaled.iloc[-1] / eq_scaled.iloc[0] - 1) if len(eq_scaled) >= 2 else 0.0
 
-            mi1, mi2, mi3 = st.columns(3)
+            mi1, mi2, mi3, mi4 = st.columns(4)
             mi1.metric("最大回撤", f"{mdd*100:.2f}%")
-            mi2.metric("年化收益", f"{annual*100:.2f}%")
-            mi3.metric("累计收益", f"{total_ret*100:.2f}%")
+            mi2.metric("胜率", f"{win_rate*100:.2f}%")
+            mi3.metric("夏普比率", f"{sharpe:.2f}")
+            mi4.metric("累计收益", f"{total_ret*100:.2f}%")
 
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=eq['date_dt'], y=eq_scaled, name='账户净值', mode='lines'))

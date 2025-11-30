@@ -1,8 +1,8 @@
 import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta
-from .database import DB_PATH, get_stock_daily
-from .data_processor import calculate_kdj, calculate_macd, calculate_trend_lines
+from database import DB_PATH, get_stock_daily
+from data_processor import calculate_kdj, calculate_macd, calculate_trend_lines
 
 INDICATOR_COLUMNS = [
     ('k', 'REAL'),
