@@ -136,6 +136,8 @@ class PortfolioManager:
         self.closed_trades: List[Dict] = []
         self.daily_equity = []
         self.operations = []  # Daily buy/sell operations log
+        # Equity index (base=1.0), updated only on realized trades using percentage returns
+        self.equity_index = 1.0
         
     def get_active_positions(self) -> List[Position]:
         """Get all active (non-closed) positions."""
@@ -211,6 +213,7 @@ class PortfolioManager:
             reason: Reason for closing
             partial_ratio: If provided, close this ratio (0.5 for half)
         """
+        # Realize trade and update cash
         if partial_ratio is not None and partial_ratio < 1.0:
             trade = position.close_partial(partial_ratio, exit_price, exit_date, reason)
             self.cash += trade['quantity'] * exit_price
@@ -219,6 +222,15 @@ class PortfolioManager:
             self.cash += trade['quantity'] * exit_price
         
         self.closed_trades.append(trade)
+        # Update equity index based on realized percentage return
+        try:
+            slot_weight = 1.0 / max(1, self.max_positions)
+            realized_ratio = (partial_ratio if (partial_ratio is not None and partial_ratio < 1.0) else 1.0)
+            ret_dec = float(trade['actual_return']) / 100.0
+            self.equity_index = self.equity_index * (1.0 + slot_weight * realized_ratio * ret_dec)
+        except Exception:
+            # Non-blocking safeguard: keep index unchanged on error
+            pass
         # Record sell operation
         self.operations.append({
             'date': exit_date,
@@ -462,14 +474,8 @@ class BacktestEngine:
                         )
             
             # Record daily equity
-            current_prices = {row['symbol']: row['close'] 
-                            for _, row in daily_predictions.iterrows()}
-            # Ensure all positions have a price (fallback to last known)
-            for pos in self.portfolio.get_active_positions():
-                if pos.symbol not in current_prices:
-                    current_prices[pos.symbol] = pos.last_price
-            
-            equity = self.portfolio.get_total_equity(current_prices)
+            # Use equity index (base=1.0) instead of cash+positions valuation
+            equity = self.portfolio.equity_index
             self.portfolio.daily_equity.append({
                 'date': current_date_str,
                 'equity': equity,
@@ -515,13 +521,14 @@ class BacktestEngine:
         win_rate = win_trades / total_trades * 100
         
         avg_return = trades_df['actual_return'].mean()
-        total_return = (self.portfolio.cash - self.initial_capital) / self.initial_capital * 100
+        # Compute total return from equity index
+        total_return = ((self.portfolio.daily_equity[-1]['equity'] if self.portfolio.daily_equity else 1.0) - 1.0) * 100
         
-        # Get final equity
+        # Get final equity (index scaled by initial capital for reporting)
         if self.portfolio.daily_equity:
-            final_equity = self.portfolio.daily_equity[-1]['equity']
+            final_equity = (self.portfolio.daily_equity[-1]['equity']) * self.initial_capital
         else:
-            final_equity = self.portfolio.cash
+            final_equity = self.initial_capital
         
         print("\n" + "="*70)
         print("BACKTEST SUMMARY")
