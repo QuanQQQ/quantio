@@ -43,6 +43,7 @@ class Position:
         self.trades = []  # List of trade records
         self.last_price = entry_price  # Fallback price when daily price missing
         self.take_profit_done = False  # Only allow one partial take-profit
+        self.short_below_hits = 0      # Count of days price < short_trend since entry
         
     def get_unrealized_pnl(self, current_price: float) -> float:
         """Calculate unrealized P&L percentage."""
@@ -343,6 +344,24 @@ class BacktestEngine:
                 return ('take_profit', 0.5)
             return None
         else:
+            # v2 enhanced rules
+            # 1) Short-trend logic first: second time below short_trend -> full close
+            below_short = False
+            if short_trend is not None:
+                try:
+                    below_short = (not np.isnan(short_trend)) and (current_price < short_trend)
+                except Exception:
+                    below_short = False
+            if below_short:
+                position.short_below_hits += 1
+                # Second time breach -> full close
+                if position.short_below_hits >= 2:
+                    return ('short_trend_break_2x', None)
+                # First time and not yet taken profit -> partial close
+                if not position.take_profit_done:
+                    return ('take_profit', 0.5)
+
+            # 2) Long-trend stop loss or percentage stop loss
             below_long = False
             if long_trend is not None:
                 try:
@@ -351,15 +370,12 @@ class BacktestEngine:
                     below_long = False
             if unrealized_pnl <= self.stop_loss_pct or below_long:
                 return ('stop_loss', None)
+
+            # 3) Predicted-based take profit (only once)
             take_profit_threshold = position.predicted_return + self.take_profit_buffer
-            below_short = False
-            if short_trend is not None:
-                try:
-                    below_short = (not np.isnan(short_trend)) and (current_price < short_trend)
-                except Exception:
-                    below_short = False
-            if (not position.take_profit_done) and (unrealized_pnl >= take_profit_threshold or below_short):
+            if (not position.take_profit_done) and unrealized_pnl >= take_profit_threshold:
                 return ('take_profit', 0.5)
+
             return None
     
     def run_backtest(self, predictions: pd.DataFrame, start_date: str, end_date: str,
@@ -482,10 +498,8 @@ class BacktestEngine:
                 # Select top N
                 candidates = candidates.head(positions_to_open * 5)
                 
-                if self.variant == 'v1':
-                    per_slot_capital = self.initial_capital / self.max_positions
-                else:
-                    per_slot_capital = (self.portfolio.equity_index * self.initial_capital) / self.max_positions
+                # Both v1 and v2 use compounding based on realized equity index
+                per_slot_capital = (self.portfolio.equity_index * self.initial_capital) / self.max_positions
                 # Determine openable slots by cash availability
                 openable_by_cash = int(self.portfolio.cash // per_slot_capital)
                 slots_to_open = min(positions_to_open, openable_by_cash)
