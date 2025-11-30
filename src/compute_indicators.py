@@ -27,7 +27,9 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.indicators import ensure_indicator_columns, compute_and_update_indicators
+from src.indicators import ensure_indicator_columns, compute_indicator_updates, compute_updates_from_df
+from src.database import DB_PATH
+import sqlite3
 from src.database import get_all_stocks
 
 def fmt_dt(dt: datetime) -> str:
@@ -53,6 +55,15 @@ def parse_symbols(symbols_arg: Optional[str], filter_tradable: bool, limit: Opti
     syms = df['symbol'].tolist()
     return syms[:limit] if limit else syms
 
+
+def worker(args):
+    sym, s, e = args
+    try:
+        return (sym, compute_indicator_updates(sym, start_date=s, end_date=e))
+    except Exception as exc:
+        print(f'  WARNING: {sym} failed: {exc}')
+        return (sym, [])
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Precompute indicators into stock_data.db')
@@ -62,6 +73,8 @@ def main():
     parser.add_argument('--symbols', type=str, help='Comma-separated symbols (e.g., 000001.SZ,600000.SH)')
     parser.add_argument('--limit', type=int, default=None, help='Limit number of symbols (for testing)')
     parser.add_argument('--no-filter', action='store_true', help='Do not filter ChiNext/STAR/BSE')
+    parser.add_argument('--bulk', action='store_true', help='Bulk read daily_prices and parallel compute per symbol (memory intensive)')
+    parser.add_argument('--chunksize', type=int, default=300000, help='Rows per chunk when bulk reading (default: 300k)')
     args = parser.parse_args()
 
     start, end = resolve_date_range(args.start, args.end, args.years)
@@ -83,25 +96,83 @@ def main():
     import multiprocessing as mp
     workers = min(mp.cpu_count(), 6)
 
-    def worker(args):
-        sym, s, e = args
-        try:
-            return compute_and_update_indicators(sym, start_date=s, end_date=e) or 0
-        except Exception as exc:
-            print(f'  WARNING: {sym} failed: {exc}')
-            return 0
 
     tasks = [(sym, start, end) for sym in symbols]
 
+    # Single writer connection
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
     try:
-        from tqdm import tqdm
-        with mp.Pool(processes=workers) as pool:
-            for changed in tqdm(pool.imap_unordered(worker, tasks, chunksize=32), total=len(tasks), unit='sym'):
-                total_changes += changed
-    except Exception as e:
-        print(f'Parallel execution failed ({e}), falling back to single process.')
-        for sym in symbols:
-            total_changes += worker((sym, start, end))
+        try:
+            cur.execute('PRAGMA journal_mode=WAL')
+            cur.execute('PRAGMA synchronous=NORMAL')
+        except Exception:
+            pass
+        def write_updates(updates):
+            if not updates:
+                return
+            CHUNK = 5000
+            for i in range(0, len(updates), CHUNK):
+                chunk = updates[i:i+CHUNK]
+                before = conn.total_changes
+                cur.executemany('''
+                    UPDATE daily_prices
+                    SET k = ?, d = ?, j = ?, macd = ?, macd_signal = ?, macd_hist = ?, short_trend = ?, long_trend = ?, vol_ma5 = ?
+                    WHERE symbol = ? AND date = ?
+                ''', chunk)
+                conn.commit()
+                return conn.total_changes - before
+
+        if not args.bulk:
+            try:
+                from tqdm import tqdm
+                with mp.Pool(processes=workers) as pool:
+                    for sym, updates in tqdm(pool.imap_unordered(worker, tasks, chunksize=32), total=len(tasks), unit='sym'):
+                        total_changes += (write_updates(updates) or 0)
+            except Exception as e:
+                print(f'Parallel execution failed ({e}), falling back to single process.')
+                for sym in symbols:
+                    _, updates = worker((sym, start, end))
+                    total_changes += (write_updates(updates) or 0)
+        else:
+            # Bulk mode: read all rows in chunks and parallel compute per symbol from in-memory DataFrame
+            params = [start or '00000000', end or '99999999']
+            syms_filter_sql = ''
+            if symbols and (not args.symbols):
+                # symbols from DB; we won't add filter in SQL to reduce complexity
+                pass
+            query = (
+                'SELECT symbol, date, open, high, low, close, volume '
+                'FROM daily_prices WHERE date BETWEEN ? AND ? '
+                'ORDER BY symbol, date'
+            )
+            try:
+                from tqdm import tqdm
+                chunks = pd.read_sql_query(query, conn, params=params, chunksize=args.chunksize)
+                for chunk in tqdm(chunks, desc='Bulk chunks', unit='rows'):
+                    # Optional filter by explicit symbols
+                    if args.symbols:
+                        chunk = chunk[chunk['symbol'].isin(symbols)]
+                    groups = chunk.groupby('symbol')
+                    task_df = [(sym, grp.copy()) for sym, grp in groups]
+                    # Parallel compute updates from DataFrame
+                    with mp.Pool(processes=workers) as pool:
+                        for sym, updates in pool.imap_unordered(
+                                lambda tup: (tup[0], compute_updates_from_df(tup[0], tup[1])), task_df, chunksize=16):
+                            total_changes += (write_updates(updates) or 0)
+            except Exception as e:
+                print(f'Bulk mode failed ({e}), falling back to per-symbol mode.')
+                try:
+                    from tqdm import tqdm
+                    with mp.Pool(processes=workers) as pool:
+                        for sym, updates in tqdm(pool.imap_unordered(worker, tasks, chunksize=32), total=len(tasks), unit='sym'):
+                            total_changes += (write_updates(updates) or 0)
+                except Exception:
+                    for sym in symbols:
+                        _, updates = worker((sym, start, end))
+                        total_changes += (write_updates(updates) or 0)
+    finally:
+        conn.close()
 
     dur = time.time() - start_time
     print(f'Completed indicators for {len(symbols)} symbols. Total DB changes: {total_changes}. Elapsed: {dur:.1f}s (workers={workers})')

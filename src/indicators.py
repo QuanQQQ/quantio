@@ -40,16 +40,14 @@ def ensure_indicator_columns():
 def _fmt(dt: datetime) -> str:
     return dt.strftime('%Y%m%d')
 
-def compute_and_update_indicators(symbol: str, start_date: str | None = None, end_date: str | None = None):
+def compute_indicator_updates(symbol: str, start_date: str | None = None, end_date: str | None = None):
     """
     Compute KDJ/MACD/trend lines/vol_ma5 for a symbol within [start_date, end_date] and update DB.
     If start_date is None, computes for full available history of the symbol.
     """
-    ensure_indicator_columns()
-
     df = get_stock_daily(symbol, start_date=start_date, end_date=end_date)
     if df.empty:
-        return 0
+        return []
 
     # Compute indicators
     df = calculate_kdj(df)
@@ -73,7 +71,14 @@ def compute_and_update_indicators(symbol: str, start_date: str | None = None, en
             symbol,
             row['date'],
         ))
+    return updates
 
+def compute_and_update_indicators(symbol: str, start_date: str | None = None, end_date: str | None = None):
+    """Convenience: compute then write updates for a single symbol."""
+    ensure_indicator_columns()
+    updates = compute_indicator_updates(symbol, start_date, end_date)
+    if not updates:
+        return 0
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     try:
@@ -87,10 +92,45 @@ def compute_and_update_indicators(symbol: str, start_date: str | None = None, en
             SET k = ?, d = ?, j = ?, macd = ?, macd_signal = ?, macd_hist = ?, short_trend = ?, long_trend = ?, vol_ma5 = ?
             WHERE symbol = ? AND date = ?
         ''', updates)
+        before = conn.total_changes
         conn.commit()
-        return conn.total_changes
+        return conn.total_changes - before
     finally:
         conn.close()
+
+def compute_updates_from_df(symbol: str, df: pd.DataFrame):
+    """Compute indicator updates given an in-memory DataFrame for a symbol.
+    The DataFrame must include columns: date, open, high, low, close, volume.
+    Returns list of parameter tuples for executemany UPDATE.
+    """
+    if df.empty:
+        return []
+    # Ensure date sorted
+    try:
+        df = df.sort_values('date')
+    except Exception:
+        pass
+    # Compute
+    df = calculate_kdj(df)
+    df = calculate_macd(df)
+    df = calculate_trend_lines(df)
+    df['vol_ma5'] = df['volume'].rolling(window=5).mean()
+    updates = []
+    for _, row in df.iterrows():
+        updates.append((
+            float(row.get('k', 0) or 0),
+            float(row.get('d', 0) or 0),
+            float(row.get('j', 0) or 0),
+            float(row.get('macd', 0) or 0),
+            float(row.get('macd_signal', 0) or 0),
+            float(row.get('macd_hist', 0) or 0),
+            float(row.get('short_trend', 0) or 0),
+            float(row.get('long_trend', 0) or 0),
+            float(row.get('vol_ma5', 0) or 0),
+            symbol,
+            row['date'],
+        ))
+    return updates
 
 def compute_indicators_recent(symbol: str, days: int = 400):
     """Compute indicators for recent N days window for a symbol."""
