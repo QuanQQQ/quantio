@@ -115,8 +115,11 @@ def save_daily_data(df):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ''', data_to_insert)
     
+    # Report how many rows were inserted in this call
+    inserted_count = conn.total_changes  # changes since connection opened
     conn.commit()
     conn.close()
+    return inserted_count
 
 def get_last_date(symbol):
     """Get the last recorded date for a stock."""

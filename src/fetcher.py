@@ -131,7 +131,7 @@ def get_counts_by_date_range(start_date: str, end_date: str):
     finally:
         conn.close()
 
-def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop_func=None, min_rows_per_day=3000):
+def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop_func=None):
     """
     Main function to update all data (Time-based iteration).
     """
@@ -177,9 +177,8 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
     now_str = datetime.now().strftime('%Y%m%d')
     counts_map = get_counts_by_date_range(all_dates[0], all_dates[-1])
     missing_dates = [d for d in all_dates if d not in counts_map]
-    incomplete_dates = [d for d in all_dates if (d in counts_map and counts_map[d] < min_rows_per_day and d <= now_str)]
     # Union sets
-    dates_to_fetch = sorted(set(missing_dates + incomplete_dates))
+    dates_to_fetch = sorted(set(missing_dates))
     
     # Filter out future dates (if any) and weekends (Tushare might handle, but good to skip if we know)
     # Actually Tushare returns empty for non-trading days, so it's fine to try fetching.
@@ -187,7 +186,7 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
     # For now, let's just try fetching all missing dates.
     
     total_days = len(dates_to_fetch)
-    print(f"Found {len(missing_dates)} missing days and {len(incomplete_dates)} incomplete days.")
+    print(f"Found {len(missing_dates)} missing days")
     print(f"Total days scheduled to fetch: {total_days} (out of {len(all_dates)} days in range).")
     
     if total_days == 0:
@@ -266,8 +265,8 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
         # Save batch
         if batch_df_list:
             full_batch_df = pd.concat(batch_df_list, ignore_index=True)
-            save_daily_data(full_batch_df)
-            print(f"  Saved {len(full_batch_df)} records for batch.")
+            inserted = save_daily_data(full_batch_df)
+            print(f"  Saved {len(full_batch_df)} records for batch. Inserted={inserted}")
         else:
             print("  No records in this batch (likely non-trading days).")
     pb.close()
