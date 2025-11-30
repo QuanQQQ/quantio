@@ -469,6 +469,10 @@ class BacktestEngine:
 
                 # Execute any pending next-open exit BEFORE other checks
                 if position.pending_exit_next_open:
+                    # Do NOT execute on the buy day; only at the NEXT trading day open
+                    if current_date_str == position.entry_date:
+                        # Keep pending and skip other actions on buy day
+                        continue
                     try:
                         exit_price = float(price_df.iloc[0]['open']) if 'open' in price_df.columns else current_price
                     except Exception:

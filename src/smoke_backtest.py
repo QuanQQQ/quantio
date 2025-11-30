@@ -43,6 +43,7 @@ def main():
         {'symbol': 'AAA', 'date': '20230102', 'predicted_return': 10.0, 'close': 100.0},
         {'symbol': 'BBB', 'date': '20230102', 'predicted_return': -1.0, 'close': 50.0},   # should be filtered (<=0)
         {'symbol': 'CCC', 'date': '20230102', 'predicted_return': 8.0,  'close': 20.0},   # fallback candidate
+        {'symbol': 'DDD', 'date': '20230102', 'predicted_return': 9.0,  'close': 100.0},  # will trigger buy-day stop
         {'symbol': 'AAA', 'date': '20230103', 'predicted_return': 10.0, 'close': 105.0},
         {'symbol': 'AAA', 'date': '20230104', 'predicted_return': 10.0, 'close': 112.0},
         {'symbol': 'AAA', 'date': '20230105', 'predicted_return': 10.0, 'close': 108.0},
@@ -66,6 +67,11 @@ def main():
     engine_v2 = MockBacktestEngine(initial_capital=100000, max_positions=5, stop_loss_pct=-5.0, take_profit_buffer=5.0, variant='v2')
     engine_v2.set_daily('AAA', daily_rows_AAA)
     engine_v2.set_daily('CCC', daily_rows_CCC)
+    engine_v2.set_daily('DDD', [
+        {'date': '20230102', 'open': 100.0, 'close': 100.0, 'long_trend': 95.0},
+        {'date': '20230103', 'open': 100.0, 'close': 94.0,  'long_trend': 95.0},  # buy day with -6% close triggers next-open stop
+        {'date': '20230104', 'open': 95.0,  'close': 95.0,  'long_trend': 95.0},
+    ])
     trades_v2 = engine_v2.run_backtest(predictions, start_date='20230102', end_date='20230106', horizon=10)
     print("\n[SMOKE TEST v2] Trades:\n", trades_v2)
     print("\n[SMOKE TEST v2] Operations:\n", engine_v2.get_operations_log())
