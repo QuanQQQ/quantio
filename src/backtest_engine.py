@@ -325,7 +325,6 @@ class BacktestEngine:
         
         # Get unique dates
         trading_dates = sorted(predictions['date'].unique())
-        
         print(f"\nRunning dynamic backtest from {start_date} to {end_date}...")
         print(f"Strategy: Top {self.max_positions} stocks, Stop-Loss: {self.stop_loss_pct}%, Take-Profit: Pred+{self.take_profit_buffer}%")
         print(f"Initial Capital: ${self.initial_capital:,.2f}\n")
@@ -392,7 +391,6 @@ class BacktestEngine:
                 # Calculate capital per position
                 available_capital = self.portfolio.cash
                 capital_per_position = available_capital / positions_to_open if positions_to_open > 0 else 0
-                
                 # Open positions
                 for _, row in candidates.iterrows():
                     if self.portfolio.get_position_count() >= self.max_positions:

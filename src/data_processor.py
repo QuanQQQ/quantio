@@ -193,7 +193,7 @@ def generate_training_data(lookback=10, horizon=3, limit_stocks=None, start_date
         tasks = [(symbol, lookback, horizon, start_date, end_date) for symbol in symbols]
         
         # Use fewer workers to reduce memory pressure
-        num_workers = min(cpu_count(), 8)  # Use half of cores or max 4
+        num_workers = min(cpu_count(), 6)  # Use half of cores or max 4
         print(f"Generating data from {len(symbols)} stocks using {num_workers} cores...")
         
         with Pool(processes=num_workers) as pool:
@@ -310,7 +310,7 @@ def generate_backtest_data(lookback=10, horizon=3, limit_stocks=None, start_date
         from tqdm import tqdm
         
         tasks = [(symbol, lookback, horizon, start_date, end_date) for symbol in symbols]
-        num_workers = min(cpu_count(), 4)
+        num_workers = min(cpu_count(), 8)
         print(f"Generating backtest data from {len(symbols)} stocks using {num_workers} cores...")
         
         with Pool(processes=num_workers) as pool:

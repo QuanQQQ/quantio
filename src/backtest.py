@@ -18,7 +18,7 @@ from src.data_processor import generate_backtest_data
 from src.config import DataConfig, get_preset
 from src.backtest_engine import BacktestEngine
 
-def run_backtest(config=None, start_date=None, end_date=None, strategy='simple',
+def run_backtest(config=None, start_date=None, end_date=None, strategy='dynamic',
                 initial_capital=100000, stop_loss=5.0, take_profit_buffer=5.0):
     """
     Run backtest with the given configuration.
