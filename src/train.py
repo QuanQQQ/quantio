@@ -1,6 +1,7 @@
 import sys
 import os
 import argparse
+import glob
 
 # Add local libs directory to path (for custom installation location)
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -17,12 +18,13 @@ from data_processor import generate_training_data
 from model import StockLSTM
 from config import DataConfig, get_preset
 
-def train_model(config=None):
+def train_model(config=None, resume_path=None):
     """
     Train the stock prediction model.
     
     Args:
         config: DataConfig instance. If None, uses default configuration.
+        resume_path: Path to checkpoint file to resume from.
     """
     # Use provided config or default
     if config is None:
@@ -114,12 +116,37 @@ def train_model(config=None):
     # Use HuberLoss for robustness against outliers
     criterion = nn.HuberLoss() 
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
     
+    # Early Stopping parameters
+    best_loss = float('inf')
+    patience = 10
+    patience_counter = 0
+    start_epoch = 0
+    
+    # Resume from checkpoint
+    if resume_path:
+        if os.path.isfile(resume_path):
+            print(f"Loading checkpoint '{resume_path}'...")
+            checkpoint = torch.load(resume_path, map_location=device)
+            start_epoch = checkpoint['epoch'] + 1
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            best_loss = checkpoint['best_loss']
+            print(f"Resumed from epoch {start_epoch}. Best loss so far: {best_loss:.4f}")
+        else:
+            print(f"Checkpoint '{resume_path}' not found. Starting from scratch.")
+
     # 3. Training Loop
     print("Start training...")
     from tqdm import tqdm
     
-    for epoch in range(NUM_EPOCHS):
+    # Create checkpoints directory
+    if not os.path.exists('checkpoints'):
+        os.makedirs('checkpoints')
+
+    for epoch in range(start_epoch, NUM_EPOCHS):
         model.train()
         total_loss = 0
         
@@ -143,25 +170,55 @@ def train_model(config=None):
             # Update progress bar description with current loss
             progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
             
-        avg_loss = total_loss / len(train_loader)
-        print(f'Epoch [{epoch+1}/{NUM_EPOCHS}], Average Loss: {avg_loss:.4f}')
-            
-    # 4. Evaluation
-    model.eval()
-    with torch.no_grad():
-        test_loss = 0
-        for batch_X, batch_y in test_loader:
-            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-            outputs = model(batch_X)
-            loss = criterion(outputs, batch_y)
-            test_loss += loss.item()
-            
-        print(f'Test Loss: {test_loss / len(test_loader):.4f}')
+        avg_train_loss = total_loss / len(train_loader)
         
-    # 5. Save Model
-    if not os.path.exists('models'):
-        os.makedirs('models')
-    torch.save(model.state_dict(), 'models/stock_lstm.pth')
+        # Validation phase
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for batch_X, batch_y in test_loader:
+                batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
+                val_loss += loss.item()
+        
+        avg_val_loss = val_loss / len(test_loader)
+        
+        # Update Scheduler
+        scheduler.step(avg_val_loss)
+        
+        print(f'Epoch [{epoch+1}/{NUM_EPOCHS}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
+        
+        # Save Checkpoint
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'best_loss': best_loss,
+            'config': config.__dict__ # Save config for reference
+        }
+        # Save latest checkpoint
+        torch.save(checkpoint, 'checkpoints/latest_checkpoint.pth')
+        
+        # Checkpointing and Early Stopping
+        if avg_val_loss < best_loss:
+            best_loss = avg_val_loss
+            patience_counter = 0
+            # Save best model
+            if not os.path.exists('models'):
+                os.makedirs('models')
+            torch.save(model.state_dict(), 'models/stock_lstm.pth')
+            # Save best checkpoint 
+            torch.save(checkpoint, 'checkpoints/best_checkpoint.pth')
+            # print(f"  Saved best model (Loss: {best_loss:.4f})")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping triggered at epoch {epoch+1}")
+                break
+            
+    print(f"Training completed. Best Validation Loss: {best_loss:.4f}")
     print("Model saved to models/stock_lstm.pth")
 
 if __name__ == "__main__":
@@ -181,6 +238,9 @@ Examples:
   
   # Load from config file
   python src/train.py --config data/config_lb20_h3_2010_2022.json
+
+  # Resume training
+  python src/train.py --resume checkpoints/latest_checkpoint.pth
         """
     )
     
@@ -199,6 +259,7 @@ Examples:
     parser.add_argument("--epochs", type=int, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, help="Batch size")
     parser.add_argument("--lr", type=float, help="Learning rate")
+    parser.add_argument("--resume", type=str, help="Path to checkpoint file to resume from")
     
     args = parser.parse_args()
     
@@ -232,4 +293,4 @@ Examples:
         config.learning_rate = args.lr
     
     # Train model
-    train_model(config)
+    train_model(config, resume_path=args.resume)

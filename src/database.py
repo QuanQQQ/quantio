@@ -237,3 +237,21 @@ def get_stock_daily_multi(symbols: list[str], start_date: str | None = None, end
     df = pd.read_sql(query, conn, params=params)
     conn.close()
     return df
+
+def delete_daily_data_range(start_date: str, end_date: str):
+    """
+    Delete daily price data within the specified date range [start_date, end_date].
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM daily_prices WHERE date >= ? AND date <= ?", (start_date, end_date))
+        deleted_count = cursor.rowcount
+        conn.commit()
+        print(f"Deleted {deleted_count} rows from daily_prices between {start_date} and {end_date}.")
+        return deleted_count
+    except Exception as e:
+        print(f"Error deleting data: {e}")
+        return 0
+    finally:
+        conn.close()

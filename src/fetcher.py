@@ -2,14 +2,86 @@ import tushare as ts
 import pandas as pd
 from datetime import datetime, timedelta
 import time
-from database import init_db, save_stocks, save_daily_data, get_last_date, get_all_stocks
+from database import init_db, save_stocks, save_daily_data, get_last_date, get_all_stocks, delete_daily_data_range
 from tqdm import tqdm
 from indicators import compute_and_update_indicators, ensure_indicator_columns
+import multiprocessing as mp
 
 # Initialize Tushare
 TOKEN = '72e098f1a916bb0ecc08ba3165108f3116bf00c3b493a405d00f6940'
 ts.set_token(TOKEN)
 pro = ts.pro_api()
+
+# Global variable for worker processes
+_rate_limiter_state = None
+
+def init_worker(shared_state):
+    """Initialize global shared state for worker processes."""
+    global _rate_limiter_state
+    _rate_limiter_state = shared_state
+
+def wait_for_token():
+    """
+    Wait for a rate limit token.
+    Shared state: (lock, req_count, window_start)
+    """
+    global _rate_limiter_state
+    if _rate_limiter_state is None:
+        return # Should not happen in worker if initialized correctly
+        
+    lock, req_count, window_start = _rate_limiter_state
+    
+    while True:
+        with lock:
+            now = time.time()
+            # Check if window needs reset
+            if now - window_start.value > 60:
+                req_count.value = 0
+                window_start.value = now
+            
+            # Check limit
+            if req_count.value < 490:
+                req_count.value += 1
+                return # Acquired
+            
+            # If limit reached, calculate wait time
+            wait_time = 60 - (now - window_start.value)
+            if wait_time < 0:
+                wait_time = 0
+                
+        # Sleep outside lock
+        if wait_time > 0:
+            time.sleep(wait_time + 0.1) # Sleep a bit extra to be safe
+
+def fetch_daily_safe(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    Fetch with Rate Limiting and Infinite Retry.
+    """
+    while True:
+        try:
+            # 1. Rate Limit
+            wait_for_token()
+            
+            # 2. Fetch
+            df = pro.daily(ts_code=symbol, start_date=start_date, end_date=end_date)
+            
+            if df is None:
+                return pd.DataFrame()
+                
+            if df.empty:
+                return pd.DataFrame()
+
+            df = df.rename(columns={
+                'ts_code': 'symbol',
+                'trade_date': 'date',
+                'vol': 'volume'
+            })
+            df = df[['symbol', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount']]
+            return df
+            
+        except Exception as e:
+            print(f"Error fetching {symbol}: {e}. Retrying in 10s...")
+            time.sleep(10)
 
 def get_trading_dates(start_date: str, end_date: str) -> list:
     """Fetch trading dates from Tushare trade calendar. Returns list of 'YYYYMMDD'."""
@@ -94,7 +166,8 @@ def fetch_daily_for_symbol(symbol: str, start_date: str, end_date: str) -> pd.Da
         })
         df = df[['symbol', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount']]
         return df
-    except Exception:
+    except Exception as e:
+        print(f"Error fetching daily data for {symbol}: {e}")
         return pd.DataFrame()
 
 def get_existing_dates():
@@ -148,7 +221,7 @@ def get_counts_by_date_range(start_date: str, end_date: str):
     finally:
         conn.close()
 
-def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop_func=None):
+def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop_func=None, force_reload_days=0):
     """
     Main function to update all data (Time-based iteration).
     """
@@ -169,6 +242,14 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
     # 2. Determine Date Range
     end_date = datetime.now()
     start_date = end_date - timedelta(days=365*lookback_years)
+
+    # Force reload logic
+    if force_reload_days > 0:
+        reload_start = end_date - timedelta(days=force_reload_days)
+        reload_start_str = reload_start.strftime('%Y%m%d')
+        reload_end_str = end_date.strftime('%Y%m%d')
+        print(f"Force reloading data from {reload_start_str} to {reload_end_str}...")
+        delete_daily_data_range(reload_start_str, reload_end_str)
     
     # Generate trading dates in range (prefer trade calendar)
     start_str = start_date.strftime('%Y%m%d')
@@ -213,7 +294,7 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
         return
 
     # Process in batches of 20 days
-    batch_size = 20
+    batch_size = 1
     # Sort missing dates to fetch in order
     dates_to_fetch.sort()
     
@@ -286,8 +367,8 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
             print(f"  Saved {len(full_batch_df)} records for batch. Inserted={inserted}")
             # Compute indicators for symbols present in this batch (recent window)
             try:
-                ensure_indicator_columns()
-                sym_set = set(full_batch_df['symbol'].unique().tolist())
+                from indicators import compute_and_update_indicators_batch
+                sym_list = full_batch_df['symbol'].unique().tolist()
                 # Limit compute window to sub-range +/- 150 days
                 range_start = min(full_batch_df['date'])
                 range_end = max(full_batch_df['date'])
@@ -296,9 +377,10 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
                     return datetime.strptime(s, '%Y%m%d')
                 exp_start = (_dt(range_start) - timedelta(days=150)).strftime('%Y%m%d')
                 exp_end = (_dt(range_end) + timedelta(days=5)).strftime('%Y%m%d')
-                for sym in tqdm(sym_set, desc="Indicators", unit="sym"):
-                    changed = compute_and_update_indicators(sym, start_date=exp_start, end_date=exp_end)
-                print(f"  Indicators updated for {len(sym_set)} symbols.")
+                
+                print(f"  Computing indicators for {len(sym_list)} symbols (batch)...")
+                updated_count = compute_and_update_indicators_batch(sym_list, start_date=exp_start, end_date=exp_end)
+                print(f"  Indicators updated: {updated_count} records.")
             except Exception as e:
                 print(f"  WARNING: Failed to compute indicators for batch: {e}")
         else:
@@ -309,13 +391,18 @@ def update_all(lookback_years=2, limit=None, progress_callback=None, should_stop
     if progress_callback:
         progress_callback(1.0, "Update complete!")
 
+def task(args):
+    # Uses global _rate_limiter_state set by initializer
+    sym, start_date, end_date = args
+    df = fetch_daily_safe(sym, start_date, end_date)
+    return sym, df
+    
 def update_by_symbols(start_date: str = None, end_date: str = None, years: int = 2,
                       limit: int = None, workers: int = 4, write_chunk_rows: int = 300000,
                       filter_tradable: bool = True):
     """
     Re-fetch daily data per symbol (parallel), then batch write to DB via a single writer.
-    - Fetch is per-symbol using Tushare pro.daily(ts_code=...)
-    - Writes are aggregated and flushed in chunks to avoid SQLite lock contention
+    Uses Rate Limiting and Retry.
     """
     init_db()
 
@@ -332,18 +419,31 @@ def update_by_symbols(start_date: str = None, end_date: str = None, years: int =
     if limit:
         symbols = symbols[:limit]
     if not symbols:
-        print('No symbols to update.')
-        return
+        print('No symbols found in DB. Fetching stock list from Tushare...')
+        stocks_df = fetch_stock_list()
+        if not stocks_df.empty:
+            save_stocks(stocks_df)
+            print(f"Saved {len(stocks_df)} stocks.")
+            symbols = stocks_df['symbol'].tolist()
+            if limit:
+                symbols = symbols[:limit]
+        else:
+            print('Failed to fetch stock list. Aborting.')
+            return
 
     print(f'Fetching by symbols: {len(symbols)} symbols, {start_date} ~ {end_date}, workers={workers}')
 
     # Parallel fetch; single writer aggregation
-    import multiprocessing as mp
     workers = max(1, min(workers, mp.cpu_count()))
 
-    def task(sym: str):
-        df = fetch_daily_for_symbol(sym, start_date, end_date)
-        return sym, df
+    # Shared State for Rate Limiting
+    manager = mp.Manager()
+    lock = manager.Lock()
+    req_count = manager.Value('i', 0)
+    window_start = manager.Value('d', time.time())
+    shared_state = (lock, req_count, window_start)
+
+
 
     total_inserted = 0
     buffer_rows = []
@@ -360,8 +460,8 @@ def update_by_symbols(start_date: str = None, end_date: str = None, years: int =
         buffer_count = 0
 
     try:
-        with mp.Pool(processes=workers) as pool:
-            for sym, df in tqdm(pool.imap_unordered(task, symbols, chunksize=16), total=len(symbols), unit='sym', desc='Fetch symbols'):
+        with mp.Pool(processes=workers, initializer=init_worker, initargs=(shared_state,)) as pool:
+            for sym, df in tqdm(pool.imap_unordered(task, [(s, start_date, end_date) for s in symbols], chunksize=1), total=len(symbols), unit='sym', desc='Fetch symbols'):
                 if df is None or df.empty:
                     continue
                 buffer_rows.append(df)
@@ -369,15 +469,8 @@ def update_by_symbols(start_date: str = None, end_date: str = None, years: int =
                 if buffer_count >= write_chunk_rows:
                     flush_buffer()
     except Exception as e:
-        print(f'Parallel fetch failed: {e}. Falling back to single process.')
-        for sym in tqdm(symbols, unit='sym', desc='Fetch symbols (single)'):
-            df = fetch_daily_for_symbol(sym, start_date, end_date)
-            if df is None or df.empty:
-                continue
-            buffer_rows.append(df)
-            buffer_count += len(df)
-            if buffer_count >= write_chunk_rows:
-                flush_buffer()
+        print(f'Parallel fetch failed: {e}.')
+        return
 
     flush_buffer()
     print(f'Total inserted rows: {total_inserted}')
@@ -392,10 +485,11 @@ if __name__ == "__main__":
     parser.add_argument("--end", type=str, help="End date YYYYMMDD (for by_symbols mode)")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for by_symbols mode")
     parser.add_argument("--write-chunk-rows", type=int, default=300000, help="Flush writes when buffer reaches this many rows")
+    parser.add_argument("--force-reload-days", type=int, default=0, help="Force delete and refetch data for the last N days")
     args = parser.parse_args()
 
     if args.mode == "by_symbols":
         update_by_symbols(start_date=args.start, end_date=args.end, years=args.years, limit=args.limit,
                           workers=args.workers, write_chunk_rows=args.write_chunk_rows, filter_tradable=False)
     else:
-        update_all(lookback_years=args.years, limit=args.limit)
+        update_all(lookback_years=args.years, limit=args.limit, force_reload_days=args.force_reload_days)

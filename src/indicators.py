@@ -132,8 +132,62 @@ def compute_updates_from_df(symbol: str, df: pd.DataFrame):
         ))
     return updates
 
-def compute_indicators_recent(symbol: str, days: int = 400):
-    """Compute indicators for recent N days window for a symbol."""
-    end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=days)
     return compute_and_update_indicators(symbol, start_date=_fmt(start_dt), end_date=_fmt(end_dt))
+
+def compute_and_update_indicators_batch(symbols: list[str], start_date: str | None = None, end_date: str | None = None):
+    """
+    Batch compute indicators for multiple symbols.
+    """
+    from database import get_stock_daily_multi
+    
+    ensure_indicator_columns()
+    
+    # 1. Fetch all data in one go
+    # Note: get_stock_daily_multi returns a single DataFrame with 'symbol' column
+    df_all = get_stock_daily_multi(symbols, start_date=start_date, end_date=end_date)
+    
+    if df_all.empty:
+        return 0
+        
+    all_updates = []
+    
+    # 2. Group by symbol and compute
+    # Using groupby is efficient
+    grouped = df_all.groupby('symbol')
+    
+    for sym, df_sym in grouped:
+        # df_sym is a slice, we can process it
+        # compute_updates_from_df expects a DataFrame for one symbol
+        updates = compute_updates_from_df(sym, df_sym)
+        all_updates.extend(updates)
+        
+    if not all_updates:
+        return 0
+        
+    # 3. Batch update
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    try:
+        try:
+            cur.execute('PRAGMA journal_mode=WAL')
+            cur.execute('PRAGMA synchronous=NORMAL')
+        except Exception:
+            pass
+            
+        # Execute in chunks to avoid "too many SQL variables" or memory issues if very large
+        chunk_size = 50000
+        total_updated = 0
+        
+        for i in range(0, len(all_updates), chunk_size):
+            chunk = all_updates[i:i+chunk_size]
+            cur.executemany('''
+                UPDATE daily_prices
+                SET k = ?, d = ?, j = ?, macd = ?, macd_signal = ?, macd_hist = ?, short_trend = ?, long_trend = ?, vol_ma5 = ?
+                WHERE symbol = ? AND date = ?
+            ''', chunk)
+            total_updated += cur.rowcount
+            
+        conn.commit()
+        return total_updated
+    finally:
+        conn.close()

@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from database import get_all_stocks, get_stock_daily, get_stock_daily_last_n
+from database import get_all_stocks, get_stock_daily, get_stock_daily_multi
 from datetime import datetime, timedelta
 
 def calculate_kdj(df, period=9):
@@ -150,20 +150,6 @@ def process_stock(args):
             # Extract Features (from DB precomputed indicators)
             feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
             window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
-            if len(window_df) < lookback:
-                if use_db_fallback:
-                    # Fallback: fetch last N trading rows up to current date
-                    try:
-                        current_date_str = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
-                        fallback_df = get_stock_daily_last_n(symbol, current_date_str, lookback)
-                        if not fallback_df.empty and len(fallback_df) == lookback:
-                            window_df = fallback_df[feature_cols].copy()
-                        else:
-                            continue
-                    except Exception:
-                        continue
-                else:
-                    continue
             
             # Normalize window
             normalized_window = normalize_data(window_df)
@@ -171,14 +157,31 @@ def process_stock(args):
             X_local.append(normalized_window.values)
             
             # Calculate Target Score
-            # User request: "Consider rise and fall magnitude"
-            # Target = Percentage Return over horizon
-            # Score = (Future_Close - Current_Close) / Current_Close * 100
-            
+            # Calculate Target Score (Scheme B: Max Gain - Max Drawdown before Peak)
             current_close = df.iloc[idx]['close']
-            future_close = df.iloc[idx+horizon]['close']
+            future_window = df.iloc[idx+1 : idx+horizon+1]
             
-            score = (future_close - current_close) / current_close * 100
+            if future_window.empty:
+                score = 0
+            else:
+                # Find Peak (Max High)
+                future_highs = future_window['high'].values
+                peak_idx = np.argmax(future_highs)
+                peak_price = future_highs[peak_idx]
+                
+                # Max Gain Pct
+                max_gain_pct = (peak_price - current_close) / current_close
+                
+                # Max Loss Pct (Drawdown from entry BEFORE peak)
+                # Slice lows up to peak_idx (inclusive)
+                future_lows = future_window['low'].values
+                pre_peak_lows = future_lows[:peak_idx+1]
+                min_low_pre_peak = np.min(pre_peak_lows)
+                
+                max_loss_pct = (current_close - min_low_pre_peak) / current_close
+                max_loss_pct = max(0, max_loss_pct)
+                
+                score = (max_gain_pct - max_loss_pct) * 100
             
             y_local.append(score)
             
@@ -186,6 +189,56 @@ def process_stock(args):
     except Exception as e:
         # print(f"Error processing {symbol}: {e}")
         return [], []
+
+def process_batch_training(args):
+    batch_syms, lookback, horizon, start_date, end_date, use_db_fallback = args
+    X_res = []
+    y_res = []
+    df_all = get_stock_daily_multi(batch_syms, start_date=start_date, end_date=end_date)
+    if df_all.empty:
+        return X_res, y_res
+    feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
+    base_cols = ['open', 'high', 'low', 'close', 'volume']
+    for symbol in batch_syms:
+        df = df_all[df_all['symbol'] == symbol].copy()
+        if len(df) < lookback + horizon + 30:
+            continue
+        if any(col not in df.columns for col in feature_cols):
+            continue
+        df.dropna(subset=base_cols + feature_cols, inplace=True)
+        if df.empty:
+            continue
+        df = df.reset_index(drop=True)
+        potential_indices = df[df['j'] < 13].index
+        for idx in potential_indices:
+            if idx < lookback or idx >= len(df) - horizon:
+                continue
+            window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
+
+            normalized_window = normalize_data(window_df)
+            X_res.append(normalized_window.values)
+            current_close = df.iloc[idx]['close']
+            future_window = df.iloc[idx+1 : idx+horizon+1]
+            
+            if future_window.empty:
+                score = 0
+            else:
+                future_highs = future_window['high'].values
+                peak_idx = np.argmax(future_highs)
+                peak_price = future_highs[peak_idx]
+                
+                max_gain_pct = (peak_price - current_close) / current_close
+                
+                future_lows = future_window['low'].values
+                pre_peak_lows = future_lows[:peak_idx+1]
+                min_low_pre_peak = np.min(pre_peak_lows)
+                
+                max_loss_pct = max(0, (current_close - min_low_pre_peak) / current_close)
+                score = (max_gain_pct - max_loss_pct) * 100
+                
+            y_res.append(score)
+    return X_res, y_res
+
 
 def generate_training_data(lookback=10, horizon=3, limit_stocks=None, start_date=None, end_date=None, use_multiprocessing=True, use_db_fallback=False, batch_fetch=False, batch_size=50):
     """
@@ -225,51 +278,7 @@ def generate_training_data(lookback=10, horizon=3, limit_stocks=None, start_date
     elif use_multiprocessing and batch_fetch:
         from multiprocessing import Pool, cpu_count
         from tqdm import tqdm
-        def process_batch_training(args):
-            batch_syms, lookback, horizon, start_date, end_date, use_db_fallback = args
-            X_res = []
-            y_res = []
-            df_all = get_stock_daily_multi(batch_syms, start_date=start_date, end_date=end_date)
-            if df_all.empty:
-                return X_res, y_res
-            feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
-            base_cols = ['open', 'high', 'low', 'close', 'volume']
-            for symbol in batch_syms:
-                df = df_all[df_all['symbol'] == symbol].copy()
-                if len(df) < lookback + horizon + 30:
-                    continue
-                if any(col not in df.columns for col in feature_cols):
-                    continue
-                df.dropna(subset=base_cols + feature_cols, inplace=True)
-                if df.empty:
-                    continue
-                df = df.reset_index(drop=True)
-                potential_indices = df[df['j'] < 13].index
-                for idx in potential_indices:
-                    if idx < lookback or idx >= len(df) - horizon:
-                        continue
-                    window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
-                    if len(window_df) < lookback:
-                        if use_db_fallback:
-                            try:
-                                current_date_str = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
-                                fallback_df = get_stock_daily_last_n(symbol, current_date_str, lookback)
-                                if not fallback_df.empty and len(fallback_df) == lookback:
-                                    window_df = fallback_df[feature_cols].copy()
-                                else:
-                                    continue
-                            except Exception:
-                                continue
-                        else:
-                            continue
-                    normalized_window = normalize_data(window_df)
-                    X_res.append(normalized_window.values)
-                    current_close = df.iloc[idx]['close']
-                    future_close = df.iloc[idx+horizon]['close']
-                    score = (future_close - current_close) / current_close * 100
-                    y_res.append(score)
-            return X_res, y_res
-
+        
         tasks = []
         for i in range(0, len(symbols), batch_size):
             tasks.append((symbols[i:i+batch_size], lookback, horizon, start_date, end_date, use_db_fallback))
@@ -316,24 +325,18 @@ def generate_training_data(lookback=10, horizon=3, limit_stocks=None, start_date
                         if idx < lookback or idx >= len(df) - horizon:
                             continue
                         window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
-                        if len(window_df) < lookback:
-                            if use_db_fallback:
-                                try:
-                                    current_date_str = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
-                                    fallback_df = get_stock_daily_last_n(symbol, current_date_str, lookback)
-                                    if not fallback_df.empty and len(fallback_df) == lookback:
-                                        window_df = fallback_df[feature_cols].copy()
-                                    else:
-                                        continue
-                                except Exception:
-                                    continue
-                            else:
-                                continue
+                      
                         normalized_window = normalize_data(window_df)
                         X_all.append(normalized_window.values)
                         current_close = df.iloc[idx]['close']
-                        future_close = df.iloc[idx+horizon]['close']
-                        score = (future_close - current_close) / current_close * 100
+                        future_window = df.iloc[idx+1 : idx+horizon+1]
+                        future_high = future_window['high'].max()
+                        future_low = future_window['low'].min()
+                        
+                        max_gain_pct = (future_high - current_close) / current_close
+                        max_loss_pct = max(0, (current_close - future_low) / current_close)
+                        
+                        score = (max_gain_pct - max_loss_pct) * 100
                         y_all.append(score)
             
     if not X_all:
@@ -413,29 +416,37 @@ def process_stock_backtest(args):
             # Extract Features (from DB precomputed indicators)
             feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
             window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
-            if len(window_df) < lookback:
-                if use_db_fallback:
-                    try:
-                        current_date_str = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
-                        fallback_df = get_stock_daily_last_n(symbol, current_date_str, lookback)
-                        if not fallback_df.empty and len(fallback_df) == lookback:
-                            window_df = fallback_df[feature_cols].copy()
-                        else:
-                            continue
-                    except Exception:
-                        continue
-                else:
-                    continue
+
             
             # Normalize window
             normalized_window = normalize_data(window_df)
             
             X_local.append(normalized_window.values)
             
-            # Calculate Target Score (Actual Return for verification)
+            # Calculate Target Score (Scheme B: Time Dependent)
             current_close = df.iloc[idx]['close']
-            future_close = df.iloc[idx+horizon]['close']
-            score = (future_close - current_close) / current_close * 100
+            future_window = df.iloc[idx+1 : idx+horizon+1]
+            
+            if future_window.empty:
+                score = 0
+                future_high = current_close
+                future_low = current_close
+            else:
+                future_highs = future_window['high'].values
+                peak_idx = np.argmax(future_highs)
+                peak_price = future_highs[peak_idx]
+                future_high = peak_price # For metadata
+                
+                max_gain_pct = (peak_price - current_close) / current_close
+                
+                future_lows = future_window['low'].values
+                pre_peak_lows = future_lows[:peak_idx+1]
+                min_low_pre_peak = np.min(pre_peak_lows)
+                future_low = min_low_pre_peak # For metadata (showing the low that mattered)
+                
+                max_loss_pct = max(0, (current_close - min_low_pre_peak) / current_close)
+                score = (max_gain_pct - max_loss_pct) * 100
+            
             y_local.append(score)
             
             # Metadata
@@ -443,8 +454,9 @@ def process_stock_backtest(args):
                 'symbol': symbol,
                 'date': df.iloc[idx]['date'],
                 'close': current_close,
-                'future_close': future_close,
-                'actual_return': score
+                'future_high': future_high,
+                'future_low': future_low, # This is now the pre-peak low
+                'score': score
             })
             
         return X_local, y_local, metadata_local
@@ -517,31 +529,40 @@ def generate_backtest_data(lookback=10, horizon=3, limit_stocks=None, start_date
                     if start_date and current_date_int < start_date_int:
                         continue
                     window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
-                    if len(window_df) < lookback:
-                        if use_db_fallback:
-                            try:
-                                cur_dt = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
-                                fallback_df = get_stock_daily_last_n(symbol, cur_dt, lookback)
-                                if not fallback_df.empty and len(fallback_df) == lookback:
-                                    window_df = fallback_df[feature_cols].copy()
-                                else:
-                                    continue
-                            except Exception:
-                                continue
-                        else:
-                            continue
+                 
                     normalized_window = normalize_data(window_df)
                     X_res.append(normalized_window.values)
                     current_close = df.iloc[idx]['close']
-                    future_close = df.iloc[idx+horizon]['close']
-                    score = (future_close - current_close) / current_close * 100
+                    future_window = df.iloc[idx+1 : idx+horizon+1]
+                    
+                    if future_window.empty:
+                        score = 0
+                        future_high = current_close
+                        future_low = current_close
+                    else:
+                        future_highs = future_window['high'].values
+                        peak_idx = np.argmax(future_highs)
+                        peak_price = future_highs[peak_idx]
+                        future_high = peak_price
+                        
+                        max_gain_pct = (peak_price - current_close) / current_close
+                        
+                        future_lows = future_window['low'].values
+                        pre_peak_lows = future_lows[:peak_idx+1]
+                        min_low_pre_peak = np.min(pre_peak_lows)
+                        future_low = min_low_pre_peak
+                        
+                        max_loss_pct = max(0, (current_close - min_low_pre_peak) / current_close)
+                        score = (max_gain_pct - max_loss_pct) * 100
+                    
                     y_res.append(score)
                     meta_res.append({
                         'symbol': symbol,
                         'date': df.iloc[idx]['date'],
                         'close': current_close,
-                        'future_close': future_close,
-                        'actual_return': score
+                        'future_high': future_high,
+                        'future_low': future_low,
+                        'score': score
                     })
             return X_res, y_res, meta_res
 
@@ -599,31 +620,40 @@ def generate_backtest_data(lookback=10, horizon=3, limit_stocks=None, start_date
                         if start_date and current_date_int < start_date_int:
                             continue
                         window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
-                        if len(window_df) < lookback:
-                            if use_db_fallback:
-                                try:
-                                    cur_dt = str(df.iloc[idx]['date']).replace('-', '').replace('/', '')
-                                    fallback_df = get_stock_daily_last_n(symbol, cur_dt, lookback)
-                                    if not fallback_df.empty and len(fallback_df) == lookback:
-                                        window_df = fallback_df[feature_cols].copy()
-                                    else:
-                                        continue
-                                except Exception:
-                                    continue
-                            else:
-                                continue
+                     
                         normalized_window = normalize_data(window_df)
                         X_all.append(normalized_window.values)
                         current_close = df.iloc[idx]['close']
-                        future_close = df.iloc[idx+horizon]['close']
-                        score = (future_close - current_close) / current_close * 100
+                        future_window = df.iloc[idx+1 : idx+horizon+1]
+                        
+                        if future_window.empty:
+                            score = 0
+                            future_high = current_close
+                            future_low = current_close
+                        else:
+                            future_highs = future_window['high'].values
+                            peak_idx = np.argmax(future_highs)
+                            peak_price = future_highs[peak_idx]
+                            future_high = peak_price
+                            
+                            max_gain_pct = (peak_price - current_close) / current_close
+                            
+                            future_lows = future_window['low'].values
+                            pre_peak_lows = future_lows[:peak_idx+1]
+                            min_low_pre_peak = np.min(pre_peak_lows)
+                            future_low = min_low_pre_peak
+                            
+                            max_loss_pct = max(0, (current_close - min_low_pre_peak) / current_close)
+                            score = (max_gain_pct - max_loss_pct) * 100
+                            
                         y_all.append(score)
                         metadata_all.append({
                             'symbol': symbol,
                             'date': df.iloc[idx]['date'],
                             'close': current_close,
-                            'future_close': future_close,
-                            'actual_return': score
+                            'future_high': future_high,
+                            'future_low': future_low,
+                            'score': score
                         })
             
     if not X_all:

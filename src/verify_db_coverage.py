@@ -118,6 +118,24 @@ def verify_db_coverage(years: int = 20, min_coverage: float = 0.95, filter_trada
     finally:
         conn.close()
 
+
+def get_targets_with_no_data(conn) -> list:
+    """
+    Identify stocks that are in the 'stocks' table but have no records in 'daily_prices'.
+    """
+    # Get all stocks
+    stocks_df = pd.read_sql('SELECT symbol, name FROM stocks', conn)
+    all_symbols = set(stocks_df['symbol'])
+    
+    # Get stocks with data
+    daily_df = pd.read_sql('SELECT DISTINCT symbol FROM daily_prices', conn)
+    existing_symbols = set(daily_df['symbol'])
+    
+    missing_symbols = list(all_symbols - existing_symbols)
+    missing_symbols.sort()
+    
+    return missing_symbols
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Verify DB coverage for near X years')
@@ -125,6 +143,21 @@ if __name__ == '__main__':
     parser.add_argument('--min-coverage', type=float, default=0.95, help='Minimum acceptable coverage ratio')
     parser.add_argument('--top-n', type=int, default=20, help='Show top N worst stocks')
     parser.add_argument('--no-filter', action='store_true', help='Do not filter out ChiNext/STAR/BSE')
+    parser.add_argument('--check-empty', action='store_true', help='Check for targets with absolutely no data')
     args = parser.parse_args()
-    verify_db_coverage(years=args.years, min_coverage=args.min_coverage, filter_tradable=not args.no_filter, top_n=args.top_n)
+
+    if args.check_empty:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            missing = get_targets_with_no_data(conn)
+            if missing:
+                print(f"Found {len(missing)} targets with NO data:")
+                for sym in missing:
+                    print(f"  {sym}")
+            else:
+                print("All targets have at least some data.")
+        finally:
+            conn.close()
+    else:
+        verify_db_coverage(years=args.years, min_coverage=args.min_coverage, filter_tradable=not args.no_filter, top_n=args.top_n)
 
