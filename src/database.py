@@ -218,32 +218,37 @@ def get_all_stocks(filter_tradable=True):
     return df
 
 def get_stock_daily(symbol, start_date=None, end_date=None):
-    """Get daily data for a stock."""
+    """Get daily data for a stock, joined with basic fields (market cap, turnover)."""
     conn = sqlite3.connect(DB_PATH)
-    query = 'SELECT * FROM daily_prices WHERE symbol = ?'
+    query = (
+        'SELECT p.*, b.total_mv, b.circ_mv, b.turnover_rate, b.turnover_rate_f '
+        'FROM daily_prices AS p '
+        'LEFT JOIN daily_basic AS b ON p.symbol = b.symbol AND p.date = b.date '
+        'WHERE p.symbol = ?'
+    )
     params = [symbol]
-    
     if start_date:
-        query += ' AND date >= ?'
+        query += ' AND p.date >= ?'
         params.append(start_date)
     if end_date:
-        query += ' AND date <= ?'
+        query += ' AND p.date <= ?'
         params.append(end_date)
-        
-    query += ' ORDER BY date'
-    
+    query += ' ORDER BY p.date'
     df = pd.read_sql(query, conn, params=params)
     conn.close()
     return df
 
 def get_stock_daily_last_n(symbol: str, end_date: str, n: int) -> pd.DataFrame:
-    """Get last N trading rows up to (and including) end_date for a stock.
+    """Get last N trading rows up to (and including) end_date for a stock, joined with basic fields.
     Returns rows sorted by date ascending.
     """
     conn = sqlite3.connect(DB_PATH)
     query = (
-        'SELECT * FROM daily_prices WHERE symbol = ? AND date <= ? '
-        'ORDER BY date DESC LIMIT ?'
+        'SELECT p.*, b.total_mv, b.circ_mv, b.turnover_rate, b.turnover_rate_f '
+        'FROM daily_prices AS p '
+        'LEFT JOIN daily_basic AS b ON p.symbol = b.symbol AND p.date = b.date '
+        'WHERE p.symbol = ? AND p.date <= ? '
+        'ORDER BY p.date DESC LIMIT ?'
     )
     df_desc = pd.read_sql(query, conn, params=[symbol, end_date, int(n)])
     conn.close()
@@ -253,23 +258,25 @@ def get_stock_daily_last_n(symbol: str, end_date: str, n: int) -> pd.DataFrame:
     return df_desc.sort_values('date').reset_index(drop=True)
 
 def get_stock_daily_multi(symbols: List[str], start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
-    """Batch fetch daily prices for multiple symbols.
-    Returns a single DataFrame including all available columns (including indicators),
-    ordered by symbol, date.
-    """
+    """Batch fetch daily prices for multiple symbols, joined with basic fields."""
     if not symbols:
         return pd.DataFrame()
     conn = sqlite3.connect(DB_PATH)
     placeholders = ','.join(['?'] * len(symbols))
-    query = f'SELECT * FROM daily_prices WHERE symbol IN ({placeholders})'
+    query = (
+        f'SELECT p.*, b.total_mv, b.circ_mv, b.turnover_rate, b.turnover_rate_f '
+        f'FROM daily_prices AS p '
+        f'LEFT JOIN daily_basic AS b ON p.symbol = b.symbol AND p.date = b.date '
+        f'WHERE p.symbol IN ({placeholders})'
+    )
     params = list(symbols)
     if start_date:
-        query += ' AND date >= ?'
+        query += ' AND p.date >= ?'
         params.append(start_date)
     if end_date:
-        query += ' AND date <= ?'
+        query += ' AND p.date <= ?'
         params.append(end_date)
-    query += ' ORDER BY symbol, date'
+    query += ' ORDER BY p.symbol, p.date'
     df = pd.read_sql(query, conn, params=params)
     conn.close()
     return df

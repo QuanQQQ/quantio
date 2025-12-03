@@ -18,7 +18,7 @@ from tqdm import tqdm
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
-from model import StockLSTM
+from model import StockLSTM, StockTransformer
 from config import DataConfig
 from fetcher import update_all
 from data_processor import normalize_data
@@ -30,12 +30,23 @@ def load_model(model_path, config, device):
         print(f"Error: Model file not found at {model_path}")
         return None
         
-    model = StockLSTM(
-        input_size=config.input_size,
-        hidden_size=config.hidden_size,
-        num_layers=config.num_layers,
-        output_size=config.output_size
-    ).to(device)
+    # Pick model type based on config
+    if getattr(config, 'model_type', 'transformer') == 'transformer':
+        model = StockTransformer(
+            input_size=config.input_size,
+            d_model=config.hidden_size,
+            num_layers=config.num_layers,
+            nhead=getattr(config, 'nhead', 4),
+            dim_feedforward=getattr(config, 'dim_feedforward', 256),
+            output_size=config.output_size
+        ).to(device)
+    else:
+        model = StockLSTM(
+            input_size=config.input_size,
+            hidden_size=config.hidden_size,
+            num_layers=config.num_layers,
+            output_size=config.output_size
+        ).to(device)
     
     try:
         # Try loading state dict directly first (saved via torch.save(model.state_dict(), ...))
@@ -89,6 +100,8 @@ def predict_daily(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
+    feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend', 'total_mv', 'circ_mv', 'turnover_rate']
+    config.input_size = len(feature_cols)
     model = load_model(args.model, config, device)
     if model is None:
         return
@@ -145,7 +158,6 @@ def predict_daily(args):
                 
             # Candidate found!
             # Prepare input
-            feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
             
             # Ensure we have enough data for the window
             if len(df) < lookback:
@@ -215,7 +227,7 @@ def predict_daily(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Predict stock targets for the next trading day.")
-    parser.add_argument("--model", type=str, default="models/stock_lstm.pth", help="Path to the trained model")
+    parser.add_argument("--model", type=str, default="models/stock_transformer.pth", help="Path to the trained model")
     parser.add_argument("--config", type=str, help="Path to the config file (optional, auto-detects if not provided)")
     parser.add_argument("--no-update", action="store_true", help="Skip data update")
     parser.add_argument("--limit", type=int, help="Limit number of stocks to scan (for testing)")

@@ -15,7 +15,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 from data_processor import generate_training_data
-from model import StockLSTM
+from model import StockLSTM, StockTransformer
 from config import DataConfig, get_preset
 
 def train_model(config=None, resume_path=None):
@@ -110,8 +110,17 @@ def train_model(config=None, resume_path=None):
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=(device.type=='cuda'))
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=(device.type=='cuda'))
     
+    config.input_size = int(X.shape[2])
+    INPUT_SIZE = config.input_size
     # 2. Initialize Model
-    model = StockLSTM(INPUT_SIZE, HIDDEN_SIZE, NUM_LAYERS, OUTPUT_SIZE).to(device)
+    if getattr(config, 'model_type', 'transformer') == 'transformer':
+        nhead = getattr(config, 'nhead', 4)
+        dim_ff = getattr(config, 'dim_feedforward', 256)
+        model = StockTransformer(INPUT_SIZE, HIDDEN_SIZE, NUM_LAYERS, nhead=nhead, dim_feedforward=dim_ff, output_size=OUTPUT_SIZE).to(device)
+        best_model_path = 'models/stock_transformer.pth'
+    else:
+        model = StockLSTM(INPUT_SIZE, HIDDEN_SIZE, NUM_LAYERS, OUTPUT_SIZE).to(device)
+        best_model_path = 'models/stock_lstm.pth'
     
     # Use HuberLoss for robustness against outliers
     criterion = nn.HuberLoss() 
@@ -208,7 +217,7 @@ def train_model(config=None, resume_path=None):
             # Save best model
             if not os.path.exists('models'):
                 os.makedirs('models')
-            torch.save(model.state_dict(), 'models/stock_lstm.pth')
+            torch.save(model.state_dict(), best_model_path)
             # Save best checkpoint 
             torch.save(checkpoint, 'checkpoints/best_checkpoint.pth')
             # print(f"  Saved best model (Loss: {best_loss:.4f})")
@@ -219,7 +228,7 @@ def train_model(config=None, resume_path=None):
                 break
             
     print(f"Training completed. Best Validation Loss: {best_loss:.4f}")
-    print("Model saved to models/stock_lstm.pth")
+    print(f"Model saved to {best_model_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

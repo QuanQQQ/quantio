@@ -23,10 +23,13 @@ class DataConfig:
     end_date: str = "20221231"
     
     # Model parameters
-    input_size: int = 13  # Features count
+    input_size: int = 13  # Will be overwritten by actual data feature size
     hidden_size: int = 128
     num_layers: int = 4
     output_size: int = 1
+    model_type: str = "transformer"  # transformer or lstm
+    nhead: int = 4
+    dim_feedforward: int = 256
     
     # Training parameters
     learning_rate: float = 0.001
@@ -119,7 +122,11 @@ class DataConfig:
             f"  Lookback: {self.lookback}",
             f"  Horizon: {self.horizon}",
             f"  Date Range: {self.start_date} - {self.end_date}",
-            f"  Model: LSTM({self.input_size}, {self.hidden_size}, {self.num_layers})",
+            (
+                f"  Model: Transformer(d_model={self.hidden_size}, layers={self.num_layers}, nhead={self.nhead})"
+                if self.model_type == "transformer"
+                else f"  Model: LSTM(input={self.input_size}, hidden={self.hidden_size}, layers={self.num_layers})"
+            ),
             f"  Training: LR={self.learning_rate}, Epochs={self.num_epochs}, Batch={self.batch_size}",
         ]
         if self.description:

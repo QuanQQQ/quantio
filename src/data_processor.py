@@ -99,6 +99,20 @@ def normalize_data(df):
     macd_cols = ['macd', 'macd_signal', 'macd_hist']
     for col in macd_cols:
         df_norm[col] = df[col] / base_price
+
+    # 5. Normalize Market Cap (relative to first value) and Turnover (percent -> ratio)
+    if 'total_mv' in df.columns:
+        mv_series = df['total_mv'].ffill().bfill()
+        base_total_mv = mv_series.iloc[0] if pd.notna(mv_series.iloc[0]) else (mv_series.mean() + 1e-8)
+        df_norm['total_mv'] = mv_series / (base_total_mv + 1e-8) - 1
+    if 'circ_mv' in df.columns:
+        cmv_series = df['circ_mv'].ffill().bfill()
+        base_circ_mv = cmv_series.iloc[0] if pd.notna(cmv_series.iloc[0]) else (cmv_series.mean() + 1e-8)
+        df_norm['circ_mv'] = cmv_series / (base_circ_mv + 1e-8) - 1
+    if 'turnover_rate' in df.columns:
+        df_norm['turnover_rate'] = (df['turnover_rate'].fillna(0)) / 100.0
+    if 'turnover_rate_f' in df.columns:
+        df_norm['turnover_rate_f'] = (df['turnover_rate_f'].fillna(0)) / 100.0
         
     return df_norm
 
@@ -143,12 +157,12 @@ def process_stock(args):
         X_local = []
         y_local = []
         
+        # Extract Features (from DB precomputed indicators + basic fields)
+        feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend', 'total_mv', 'circ_mv', 'turnover_rate']
+        
         for idx in potential_indices:
             if idx < lookback or idx >= len(df) - horizon:
                 continue
-                
-            # Extract Features (from DB precomputed indicators)
-            feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
             window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
             
             # Normalize window
@@ -197,15 +211,16 @@ def process_batch_training(args):
     df_all = get_stock_daily_multi(batch_syms, start_date=start_date, end_date=end_date)
     if df_all.empty:
         return X_res, y_res
-    feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
+    feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend', 'total_mv', 'circ_mv', 'turnover_rate']
     base_cols = ['open', 'high', 'low', 'close', 'volume']
+    required_cols = ['k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
     for symbol in batch_syms:
         df = df_all[df_all['symbol'] == symbol].copy()
         if len(df) < lookback + horizon + 30:
             continue
         if any(col not in df.columns for col in feature_cols):
             continue
-        df.dropna(subset=base_cols + feature_cols, inplace=True)
+        df.dropna(subset=base_cols + required_cols, inplace=True)
         if df.empty:
             continue
         df = df.reset_index(drop=True)
@@ -308,15 +323,16 @@ def generate_training_data(lookback=10, horizon=3, limit_stocks=None, start_date
                 df_all = get_stock_daily_multi(batch_syms, start_date=start_date, end_date=end_date)
                 if df_all.empty:
                     continue
-                feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
+                feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend', 'total_mv', 'circ_mv', 'turnover_rate']
                 base_cols = ['open', 'high', 'low', 'close', 'volume']
+                required_cols = ['k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
                 for symbol in batch_syms:
                     df = df_all[df_all['symbol'] == symbol].copy()
                     if len(df) < lookback + horizon + 30:
                         continue
                     if any(col not in df.columns for col in feature_cols):
                         continue
-                    df.dropna(subset=base_cols + feature_cols, inplace=True)
+                    df.dropna(subset=base_cols + required_cols, inplace=True)
                     if df.empty:
                         continue
                     df = df.reset_index(drop=True)
@@ -413,8 +429,8 @@ def process_stock_backtest(args):
             if start_date and current_date_int < start_date_int:
                 continue
                 
-            # Extract Features (from DB precomputed indicators)
-            feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
+            # Extract Features (from DB precomputed indicators + basic fields)
+            feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend', 'total_mv', 'circ_mv', 'turnover_rate']
             window_df = df.iloc[idx-lookback+1 : idx+1][feature_cols].copy()
 
             
@@ -504,8 +520,9 @@ def generate_backtest_data(lookback=10, horizon=3, limit_stocks=None, start_date
             df_all = get_stock_daily_multi(batch_syms, start_date=start_date, end_date=end_date)
             if df_all.empty:
                 return X_res, y_res, meta_res
-            feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
+            feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend', 'total_mv', 'circ_mv', 'turnover_rate']
             base_cols = ['open', 'high', 'low', 'close', 'volume']
+            required_cols = ['k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
             start_date_int = int(start_date) if start_date else 0
             for symbol in batch_syms:
                 df = df_all[df_all['symbol'] == symbol].copy()
@@ -513,7 +530,7 @@ def generate_backtest_data(lookback=10, horizon=3, limit_stocks=None, start_date
                     continue
                 if any(col not in df.columns for col in feature_cols):
                     continue
-                df.dropna(subset=base_cols + feature_cols, inplace=True)
+                df.dropna(subset=base_cols + required_cols, inplace=True)
                 if df.empty:
                     continue
                 df = df.reset_index(drop=True)
@@ -595,8 +612,9 @@ def generate_backtest_data(lookback=10, horizon=3, limit_stocks=None, start_date
                 df_all = get_stock_daily_multi(batch_syms, start_date=start_date, end_date=end_date)
                 if df_all.empty:
                     continue
-                feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
+                feature_cols = ['open', 'high', 'low', 'close', 'volume', 'k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend', 'total_mv', 'circ_mv', 'turnover_rate']
                 base_cols = ['open', 'high', 'low', 'close', 'volume']
+                required_cols = ['k', 'd', 'j', 'macd', 'macd_signal', 'macd_hist', 'short_trend', 'long_trend']
                 start_date_int = int(start_date) if start_date else 0
                 for symbol in batch_syms:
                     df = df_all[df_all['symbol'] == symbol].copy()
@@ -604,7 +622,7 @@ def generate_backtest_data(lookback=10, horizon=3, limit_stocks=None, start_date
                         continue
                     if any(col not in df.columns for col in feature_cols):
                         continue
-                    df.dropna(subset=base_cols + feature_cols, inplace=True)
+                    df.dropna(subset=base_cols + required_cols, inplace=True)
                     if df.empty:
                         continue
                     df = df.reset_index(drop=True)
