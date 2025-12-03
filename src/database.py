@@ -2,6 +2,7 @@ import sqlite3
 import pandas as pd
 import os
 from datetime import datetime
+from typing import List, Optional
 
 DB_PATH = os.path.join("data", "stock_data.db")
 
@@ -33,6 +34,17 @@ def init_db():
             close REAL,
             volume REAL,
             amount REAL,
+            PRIMARY KEY (symbol, date)
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS daily_basic (
+            symbol TEXT,
+            date TEXT,
+            total_mv REAL,
+            circ_mv REAL,
+            turnover_rate REAL,
+            turnover_rate_f REAL,
             PRIMARY KEY (symbol, date)
         )
     ''')
@@ -117,6 +129,30 @@ def save_daily_data(df):
     
     # Report how many rows were inserted in this call
     inserted_count = conn.total_changes  # changes since connection opened
+    conn.commit()
+    conn.close()
+    return inserted_count
+
+def save_daily_basic(df):
+    if df.empty:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    data_to_insert = []
+    for _, row in df.iterrows():
+        data_to_insert.append((
+            row['symbol'],
+            row['date'],
+            row.get('total_mv'),
+            row.get('circ_mv'),
+            row.get('turnover_rate'),
+            row.get('turnover_rate_f')
+        ))
+    cursor.executemany('''
+        INSERT OR IGNORE INTO daily_basic (symbol, date, total_mv, circ_mv, turnover_rate, turnover_rate_f)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', data_to_insert)
+    inserted_count = conn.total_changes
     conn.commit()
     conn.close()
     return inserted_count
@@ -216,7 +252,7 @@ def get_stock_daily_last_n(symbol: str, end_date: str, n: int) -> pd.DataFrame:
     # Return ascending order
     return df_desc.sort_values('date').reset_index(drop=True)
 
-def get_stock_daily_multi(symbols: list[str], start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+def get_stock_daily_multi(symbols: List[str], start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
     """Batch fetch daily prices for multiple symbols.
     Returns a single DataFrame including all available columns (including indicators),
     ordered by symbol, date.

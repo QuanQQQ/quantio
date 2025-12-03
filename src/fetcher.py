@@ -2,9 +2,8 @@ import tushare as ts
 import pandas as pd
 from datetime import datetime, timedelta
 import time
-from database import init_db, save_stocks, save_daily_data, get_last_date, get_all_stocks, delete_daily_data_range
+from database import init_db, save_stocks, save_daily_data, get_last_date, get_all_stocks, delete_daily_data_range, save_daily_basic
 from tqdm import tqdm
-from indicators import compute_and_update_indicators, ensure_indicator_columns
 import multiprocessing as mp
 
 # Initialize Tushare
@@ -81,6 +80,26 @@ def fetch_daily_safe(symbol: str, start_date: str, end_date: str) -> pd.DataFram
             
         except Exception as e:
             print(f"Error fetching {symbol}: {e}. Retrying in 10s...")
+            time.sleep(10)
+
+def fetch_daily_basic_safe(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    while True:
+        try:
+            wait_for_token()
+            df = pro.daily_basic(ts_code=symbol, start_date=start_date, end_date=end_date,
+                                 fields='ts_code,trade_date,total_mv,circ_mv,turnover_rate,turnover_rate_f')
+            if df is None:
+                return pd.DataFrame()
+            if df.empty:
+                return pd.DataFrame()
+            df = df.rename(columns={
+                'ts_code': 'symbol',
+                'trade_date': 'date'
+            })
+            df = df[['symbol', 'date', 'total_mv', 'circ_mv', 'turnover_rate', 'turnover_rate_f']]
+            return df
+        except Exception as e:
+            print(f"Error fetching basic {symbol}: {e}. Retrying in 10s...")
             time.sleep(10)
 
 def get_trading_dates(start_date: str, end_date: str) -> list:
@@ -396,6 +415,11 @@ def task(args):
     sym, start_date, end_date = args
     df = fetch_daily_safe(sym, start_date, end_date)
     return sym, df
+
+def task_basic(args):
+    sym, start_date, end_date = args
+    df = fetch_daily_basic_safe(sym, start_date, end_date)
+    return sym, df
     
 def update_by_symbols(start_date: str = None, end_date: str = None, years: int = 2,
                       limit: int = None, workers: int = 4, write_chunk_rows: int = 300000,
@@ -475,12 +499,67 @@ def update_by_symbols(start_date: str = None, end_date: str = None, years: int =
     flush_buffer()
     print(f'Total inserted rows: {total_inserted}')
 
+def update_daily_basic_by_symbols(start_date: str = None, end_date: str = None, years: int = 2,
+                                  limit: int = None, workers: int = 4, write_chunk_rows: int = 300000,
+                                  filter_tradable: bool = True):
+    init_db()
+    if not (start_date and end_date):
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=365 * years)
+        start_date = start_dt.strftime('%Y%m%d')
+        end_date = end_dt.strftime('%Y%m%d')
+    stocks_df = get_all_stocks(filter_tradable=filter_tradable)
+    symbols = stocks_df['symbol'].tolist()
+    if limit:
+        symbols = symbols[:limit]
+    if not symbols:
+        stocks_df = fetch_stock_list()
+        if not stocks_df.empty:
+            save_stocks(stocks_df)
+            symbols = stocks_df['symbol'].tolist()
+            if limit:
+                symbols = symbols[:limit]
+        else:
+            return
+    workers = max(1, min(workers, mp.cpu_count()))
+    manager = mp.Manager()
+    lock = manager.Lock()
+    req_count = manager.Value('i', 0)
+    window_start = manager.Value('d', time.time())
+    shared_state = (lock, req_count, window_start)
+    total_inserted = 0
+    buffer_rows = []
+    buffer_count = 0
+    def flush_buffer():
+        nonlocal buffer_rows, buffer_count, total_inserted
+        if not buffer_rows:
+            return
+        merged = pd.concat(buffer_rows, ignore_index=True)
+        inserted = save_daily_basic(merged)
+        total_inserted += (inserted or 0)
+        buffer_rows = []
+        buffer_count = 0
+    try:
+        with mp.Pool(processes=workers, initializer=init_worker, initargs=(shared_state,)) as pool:
+            for sym, df in tqdm(pool.imap_unordered(task_basic, [(s, start_date, end_date) for s in symbols], chunksize=1), total=len(symbols), unit='sym', desc='Fetch basic'):
+                if df is None or df.empty:
+                    continue
+                buffer_rows.append(df)
+                buffer_count += len(df)
+                if buffer_count >= write_chunk_rows:
+                    flush_buffer()
+    except Exception as e:
+        print(f'Parallel fetch basic failed: {e}.')
+        return
+    flush_buffer()
+    print(f'Total inserted basic rows: {total_inserted}')
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Fetch and update A-share stock data.a")
     parser.add_argument("--years", "-y", type=int, default=2, help="Number of years of historical data to fetch (default: 2)")
     parser.add_argument("--limit", "-l", type=int, default=None, help="Limit number of stocks to update (for testing)")
-    parser.add_argument("--mode", type=str, default="by_dates", choices=["by_dates","by_symbols"], help="Fetch mode: by_dates (existing) or by_symbols (parallel per-symbol)")
+    parser.add_argument("--mode", type=str, default="by_dates", choices=["by_dates","by_symbols","basic_by_symbols"], help="Fetch mode")
     parser.add_argument("--start", type=str, help="Start date YYYYMMDD (for by_symbols mode)")
     parser.add_argument("--end", type=str, help="End date YYYYMMDD (for by_symbols mode)")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for by_symbols mode")
@@ -491,5 +570,8 @@ if __name__ == "__main__":
     if args.mode == "by_symbols":
         update_by_symbols(start_date=args.start, end_date=args.end, years=args.years, limit=args.limit,
                           workers=args.workers, write_chunk_rows=args.write_chunk_rows, filter_tradable=False)
+    elif args.mode == "basic_by_symbols":
+        update_daily_basic_by_symbols(start_date=args.start, end_date=args.end, years=args.years, limit=args.limit,
+                                      workers=args.workers, write_chunk_rows=args.write_chunk_rows, filter_tradable=False)
     else:
         update_all(lookback_years=args.years, limit=args.limit, force_reload_days=args.force_reload_days)
